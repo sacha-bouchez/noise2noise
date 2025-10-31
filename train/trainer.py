@@ -4,19 +4,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from data.data_loader import SinogramGenerator
+from noise2noise.data.data_loader import SinogramGenerator
 
-try:
-    # prefer skimage if available for robust implementations
-    from skimage.metrics import peak_signal_noise_ratio as sk_peak_signal_noise_ratio
-    from skimage.metrics import structural_similarity as sk_structural_similarity
-    _HAS_SKIMAGE = True
-except Exception:
-    _HAS_SKIMAGE = False
+from pytorcher.trainer import PytorchTrainer
+from pytorcher.models import UNet
 
-from model.unet_model import UNet
-
-class Noise2NoiseTrainer:
+class Noise2NoiseTrainer(PytorchTrainer):
 
     def __init__(self, binsimu=None,
                        dest_path='./',
@@ -42,12 +35,13 @@ class Noise2NoiseTrainer:
         self.learning_rate = learning_rate
         self.seed = seed
 
-        # create dataset / loader / model / optimizer
-        self.loader = self.create_data_loader()
-        self.model = self.create_model()
-        self.signature = self.get_signature()
-        self.optimizer = self.get_optimizer(learning_rate=self.learning_rate)
-        self.objective = self.get_objective()
+        metrics = [
+            ('PSNR', {'max_val': 1.0}),
+            ('Mean', {'name': 'loss'}),
+            ('SSIM', {'max_val': 1.0}),
+        ]
+
+        super(Noise2NoiseTrainer, self).__init__(metrics=metrics)
 
     def create_data_loader(self):
 
@@ -69,11 +63,8 @@ class Noise2NoiseTrainer:
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
         model = UNet(n_channels=1, n_classes=1)
+        model = model.to(self.device)
         return model
-
-    def get_optimizer(self, learning_rate=1e-3):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
-        return optimizer
 
     def get_objective(self):
         objective = torch.nn.MSELoss()
@@ -83,6 +74,12 @@ class Noise2NoiseTrainer:
 
         for epoch in range(self.n_epochs):
             for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader):
+
+                # Move data to device
+                noisy_img1 = noisy_img1.to(self.device)
+                noisy_img2 = noisy_img2.to(self.device)
+                clean_img = clean_img.to(self.device)
+
                 # ensure channel dimension: dataset returns (B, H, W)
                 if noisy_img1.dim() == 3:
                     noisy_img1 = noisy_img1.unsqueeze(1)
@@ -103,8 +100,14 @@ class Noise2NoiseTrainer:
                 loss.backward()
                 self.optimizer.step()
 
-                # Logging
-                # TODO MLflow integration
-                if batch_idx % 10 == 0:
-                    print(f'Epoch [{epoch+1}/{self.n_epochs}], Step [{batch_idx+1}/{len(self.loader)}], '
-                          f'Loss: {loss.item():.4f}')
+                self.update_metrics(loss, clean_img, outputs)
+                #
+                print(f'Epoch [{epoch+1}/{self.n_epochs}], Step [{batch_idx+1}/{len(self.loader)}]')
+
+            print(f'End of Epoch {epoch+1}, metrics: ')
+            for metric in self.metrics:
+                print(f'{metric.name}: {metric.result():.4f}')
+                metric.reset_states()
+
+            #
+            self.on_epoch_end(epoch)
