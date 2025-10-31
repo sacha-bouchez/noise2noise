@@ -1,4 +1,6 @@
 import os
+import random
+import shutil
 
 import torch
 from torch.utils.data import Dataset
@@ -17,32 +19,52 @@ class SinogramGenerator(Dataset):
         self.image_size = image_size
         self.voxel_size = voxel_size
         self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size)
-        self.sinogram_simulator = SinogramSimulator(binsimu=binsimu, save_castor=False, seed=seed)
+        if seed is None:
+            self.seed = random.randint(0, 1e32)
         self.seed = seed
+        self.sinogram_simulator = SinogramSimulator(binsimu=binsimu, save_castor=False, seed=seed) # NOTE this seed is useless
+        #
+        self.hashcode = self.get_generator_hashcode()
 
     def __len__(self):
         return self.length
 
+    def get_generator_hashcode(self):
+        return hash((
+                     self.image_size,
+                     self.voxel_size,
+                     self.seed)) & 0xffffffff
+
     def normalize(self, x):
         return (x - torch.min(x)) / (torch.max(x) - torch.min(x))
 
-    def generate_sample(self, idx):
+    def generate_sample(self, idx, attempt=0):
 
         # Set seeds
-        if self.seed is not None:
-            torch.manual_seed(self.seed + idx)
-            torch.cuda.manual_seed_all(self.seed + idx)
-            self.phantom_generator.set_seed(self.seed + idx)
+        torch.manual_seed(self.seed + idx + attempt)
+        torch.cuda.manual_seed_all(self.seed + idx + attempt)
+        self.phantom_generator.set_seed(self.seed + idx + attempt)
+
+        # Create unique hashcode for data sample with idx and dataset generator hashcode
+        data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
 
         #
-        dest_path = os.path.join(self.dest_path, f'data_{idx}')
+        dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
         if not os.path.exists(f'{dest_path}/simu/simu_nfpt.s.hdr'):
-        
-            # Generate phantom
-            obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{idx}', f'object'))
 
-            # Simulate sinogram
-            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
+            try:
+                # Generate phantom
+                obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
+                # Simulate sinogram
+                self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
+            except Exception as e:
+                print(f'Error generating sample {idx} (attempt {attempt}): {e}')
+                shutil.rmtree(dest_path, ignore_errors=True)
+                if attempt < 5:
+                    return self.generate_sample(idx, attempt=attempt+1)
+                else:
+                    print(f'Failed to generate sample {idx} after 5 attempts with error: {e}')
+                    raise e
 
         # Read hdr file to get matrix size
         with open(f'{dest_path}/simu/simu_nfpt.s.hdr', 'r') as f:
