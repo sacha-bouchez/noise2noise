@@ -31,8 +31,8 @@ class SinogramGenerator(Dataset):
 
     def get_generator_hashcode(self):
         return hash((
-                     self.image_size,
-                     self.voxel_size,
+                     tuple(self.image_size),
+                     tuple(self.voxel_size),
                      self.seed)) & 0xffffffff
 
     def normalize(self, x):
