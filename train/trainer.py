@@ -1,6 +1,8 @@
 import os
 import numpy as np
+import mlflow
 import torch
+import hashlib, json
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
@@ -16,6 +18,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        dataset_size=10000,
                        n_epochs=200,
                        batch_size=64,
+                       metrics_configs=[],
                        shuffle=False,
                        image_size=(256,256),
                        voxel_size=(2,2,2),
@@ -29,19 +32,17 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.dataset_size = dataset_size
         self.n_epochs = n_epochs
         self.batch_size = batch_size
+        self.metrics_configs = metrics_configs
         self.shuffle = shuffle
         self.image_size = image_size
         self.voxel_size = voxel_size
         self.learning_rate = learning_rate
         self.seed = seed
 
-        metrics = [
-            ('PSNR', {'max_val': 1.0}),
-            ('Mean', {'name': 'loss'}),
-            ('SSIM', {'max_val': 1.0}),
-        ]
+        self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
 
-        super(Noise2NoiseTrainer, self).__init__(metrics=metrics)
+        super(Noise2NoiseTrainer, self).__init__(metrics=metrics_configs)
+
 
     def create_data_loader(self):
 
@@ -107,7 +108,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
             print(f'End of Epoch {epoch+1}, metrics: ')
             for metric in self.metrics:
                 print(f'{metric.name}: {metric.result():.4f}')
-                metric.reset_states()
+
+                # Log metrics to MLflow
+                mlflow.log_metric(metric.name, metric.result(), step=epoch)
 
             #
             self.on_epoch_end(epoch)
+
+            # log model
+            mlflow.pytorch.log_model(self.model, artifact_path="model", registered_model_name="Noise2NoiseModel")
