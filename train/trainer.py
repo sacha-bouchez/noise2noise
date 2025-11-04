@@ -67,13 +67,30 @@ class Noise2NoiseTrainer(PytorchTrainer):
         model = model.to(self.device)
         return model
 
+    def load_model_and_optimizer(self, path="reboot_model"):
+        #
+        try:
+            mlflow.artifacts.download_artifacts(artifact_path=path, dst_path="/tmp/reboot_model", run_id=mlflow.active_run().info.run_id)
+        except mlflow.exceptions.MlflowException:
+            print("No reboot model found in mlflow artifacts.")
+            return
+        #
+        if os.path.exists("/tmp/reboot_model/reboot_model.pth") and os.path.exists("/tmp/reboot_model/epoch.txt") and os.path.exists("/tmp/reboot_model/optimizer.pth"):
+            self.model.load_state_dict(torch.load("/tmp/reboot_model/reboot_model.pth"))
+            with open("/tmp/reboot_model/epoch.txt", "r") as f:
+                self.initial_epoch = int(f.read()) + 1
+            self.optimizer.load_state_dict(torch.load("/tmp/reboot_model/optimizer.pth"))
+            print(f"Rebooted model from epoch {self.initial_epoch}")
+        else:
+            print("No reboot model found, training from scratch.")
+
     def get_objective(self):
         objective = torch.nn.MSELoss()
         return objective
 
     def fit(self):
 
-        for epoch in range(self.n_epochs):
+        for epoch in range(self.initial_epoch, self.n_epochs):
             for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader):
 
                 # Move data to device
@@ -115,5 +132,16 @@ class Noise2NoiseTrainer(PytorchTrainer):
             #
             self.on_epoch_end(epoch)
 
-            # log model
-            mlflow.pytorch.log_model(self.model, artifact_path="model", registered_model_name="Noise2NoiseModel")
+            # log reboot model as artifact
+            os.makedirs("/tmp/reboot_model", exist_ok=True)
+            torch.save(self.model.state_dict(), f"/tmp/reboot_model/reboot_model.pth")
+            with open(f"/tmp/reboot_model/epoch.txt", "w") as f:
+                f.write(str(epoch))
+            mlflow.log_artifact(f"/tmp/reboot_model/reboot_model.pth", artifact_path="reboot_model")
+            mlflow.log_artifact(f"/tmp/reboot_model/epoch.txt", artifact_path="reboot_model")
+            # save optimizer state
+            torch.save(self.optimizer.state_dict(), f"/tmp/reboot_model/optimizer.pth")
+            mlflow.log_artifact(f"/tmp/reboot_model/optimizer.pth", artifact_path="reboot_model")
+
+        # log final model
+        mlflow.pytorch.log_model(self.model, artifact_path="model", registered_model_name="Noise2Noise_2DPET_Model")
