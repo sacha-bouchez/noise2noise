@@ -25,6 +25,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        image_size=(256,256),
                        voxel_size=(2,2,2),
                        learning_rate=1e-3,
+                       num_workers=10,
                        seed=42):
         if binsimu is None:
             self.binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
@@ -43,6 +44,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.learning_rate = learning_rate
         self.seed = seed
 
+        self.num_workers = num_workers
+
         self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
 
         super(Noise2NoiseTrainer, self).__init__(metrics=metrics_configs)
@@ -56,7 +59,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
                                          seed=self.seed)
-        loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle)
+        loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
 
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
         self.dataset_val = SinogramGenerator(self.binsimu,
@@ -65,7 +68,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
                                          seed=self.dataset_val_seed)
-        loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False)
+        loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
         return loader_train, loader_val
 

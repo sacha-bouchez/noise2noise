@@ -12,7 +12,7 @@ if __name__ == "__main__":
         dataset_val_size=512,
         val_freq=1,
         n_epochs=15,
-        batch_size=4,
+        batch_size=8,
         metrics_configs=[
             ['PSNR', {'max_val': 1.0}],
             ['Mean', {'name': 'loss'}],
@@ -22,6 +22,7 @@ if __name__ == "__main__":
         image_size=[256, 256],
         voxel_size=[2, 2, 2],
         learning_rate=1e-4,
+        num_workers=10,
         seed=42
     )
 
