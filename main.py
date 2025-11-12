@@ -8,9 +8,11 @@ if __name__ == "__main__":
     trainer = Noise2NoiseTrainer(
         binsimu=None,
         dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
-        dataset_size=20000,
-        n_epochs=200,
-        batch_size=8,
+        dataset_train_size=2048,
+        dataset_val_size=512,
+        val_freq=1,
+        n_epochs=15,
+        batch_size=4,
         metrics_configs=[
             ['PSNR', {'max_val': 1.0}],
             ['Mean', {'name': 'loss'}],

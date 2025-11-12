@@ -15,7 +15,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def __init__(self, binsimu=None,
                        dest_path='./',
-                       dataset_size=10000,
+                       dataset_train_size=10000,
+                       dataset_val_size=500,
+                       val_freq=1,
                        n_epochs=200,
                        batch_size=64,
                        metrics_configs=[],
@@ -29,7 +31,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
         else:
             self.binsimu = binsimu
         self.dest_path = dest_path
-        self.dataset_size = dataset_size
+        self.dataset_train_size = dataset_train_size
+        self.dataset_val_size = dataset_val_size
+        self.val_freq = val_freq
         self.n_epochs = n_epochs
         self.batch_size = batch_size
         self.metrics_configs = metrics_configs
@@ -46,24 +50,33 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_data_loader(self):
 
-        self.dataset = SinogramGenerator(self.binsimu,
-                                         dest_path=self.dest_path,
-                                         length=self.dataset_size,
+        self.dataset_train = SinogramGenerator(self.binsimu,
+                                         dest_path=os.path.join(self.dest_path, 'train'),
+                                         length=self.dataset_train_size,
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
                                          seed=self.seed)
-        loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=self.shuffle)
+        loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle)
 
-        return loader
+        self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
+        self.dataset_val = SinogramGenerator(self.binsimu,
+                                         dest_path=os.path.join(self.dest_path, 'val'),
+                                         length=self.dataset_val_size,
+                                         image_size=self.image_size,
+                                         voxel_size=self.voxel_size,
+                                         seed=self.dataset_val_seed)
+        loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False)
+
+        return loader_train, loader_val
 
     def get_signature(self):
-        sample = self.dataset.__getitem__(0)[0]
+        sample = self.dataset_train.__getitem__(0)[0]
         signature = (1, ) + tuple(sample.shape)
         return signature
 
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
-        model = UNet(n_channels=1, n_classes=1)
+        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type='separable')
         model = model.to(self.device)
         return model
 
@@ -88,10 +101,25 @@ class Noise2NoiseTrainer(PytorchTrainer):
         objective = torch.nn.MSELoss()
         return objective
 
+    def log_and_reset_metrics(self, epoch):
+        print(f'End of Epoch {epoch+1}, metrics: ')
+        for metric in self.metrics:
+            print(f'{metric.name}: {metric.result():.4f}')
+
+            # Log metrics to MLflow
+            mlflow.log_metric(metric.name, metric.result(), step=epoch)
+
+            # Reset metric
+            metric.reset_states()
+
     def fit(self):
 
         for epoch in range(self.initial_epoch, self.n_epochs):
-            for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader):
+
+            m_dict = {}
+
+            # TRAIN
+            for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader_train):
 
                 # Move data to device
                 noisy_img1 = noisy_img1.to(self.device)
@@ -120,17 +148,43 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 self.update_metrics(loss, clean_img, outputs)
                 #
-                print(f'Epoch [{epoch+1}/{self.n_epochs}], Step [{batch_idx+1}/{len(self.loader)}]')
+                print(f'Epoch [{epoch+1}/{self.n_epochs}], Train,  Step [{batch_idx+1}/{len(self.loader_train)}]')
 
-            print(f'End of Epoch {epoch+1}, metrics: ')
             for metric in self.metrics:
                 print(f'{metric.name}: {metric.result():.4f}')
+                m_dict.update({metric.name: metric.result()})
+                # reset state
+                metric.reset_states()
 
-                # Log metrics to MLflow
-                mlflow.log_metric(metric.name, metric.result(), step=epoch)
+            # VALIDATION
+            if (epoch + 1) % self.val_freq == 0:
+                for batch_idx, (noisy_img, _, clean_img) in enumerate(self.loader_val):
+                    noisy_img = noisy_img.to(self.device)
+                    clean_img = clean_img.to(self.device)
 
-            #
-            self.on_epoch_end(epoch)
+                    if noisy_img.dim() == 3:
+                        noisy_img = noisy_img.unsqueeze(1)
+                    if clean_img.dim() == 3:
+                        clean_img = clean_img.unsqueeze(1)
+
+                    noisy_img = noisy_img.float()
+                    clean_img = clean_img.float()
+
+                    outputs = self.model(noisy_img)
+                    val_loss = self.objective(outputs, clean_img)
+                    self.update_metrics(val_loss, clean_img, outputs)
+                    #
+                    print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
+
+                for metric in self.metrics:
+                    print(f'{metric.name}: {metric.result():.4f}')
+                    m_dict.update({f'val_{metric.name}': metric.result()})
+                    # reset state
+                    metric.reset_states()
+
+            # log metrics
+            for metric_name, metric_value in m_dict.items():
+                mlflow.log_metric(metric_name, metric_value, step=epoch+1)
 
             # log reboot model as artifact
             os.makedirs("/tmp/reboot_model", exist_ok=True)
