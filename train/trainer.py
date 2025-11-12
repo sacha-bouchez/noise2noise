@@ -158,29 +158,38 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
             # VALIDATION
             if (epoch + 1) % self.val_freq == 0:
-                for batch_idx, (noisy_img, _, clean_img) in enumerate(self.loader_val):
-                    noisy_img = noisy_img.to(self.device)
-                    clean_img = clean_img.to(self.device)
+                # run model in evaluation mode and avoid building computation graph
+                self.model.eval()
+                with torch.no_grad():
+                    for batch_idx, (noisy_img, _, clean_img) in enumerate(self.loader_val):
+                        noisy_img = noisy_img.to(self.device)
+                        clean_img = clean_img.to(self.device)
 
-                    if noisy_img.dim() == 3:
-                        noisy_img = noisy_img.unsqueeze(1)
-                    if clean_img.dim() == 3:
-                        clean_img = clean_img.unsqueeze(1)
+                        if noisy_img.dim() == 3:
+                            noisy_img = noisy_img.unsqueeze(1)
+                        if clean_img.dim() == 3:
+                            clean_img = clean_img.unsqueeze(1)
 
-                    noisy_img = noisy_img.float()
-                    clean_img = clean_img.float()
+                        noisy_img = noisy_img.float()
+                        clean_img = clean_img.float()
 
-                    outputs = self.model(noisy_img)
-                    val_loss = self.objective(outputs, clean_img)
-                    self.update_metrics(val_loss, clean_img, outputs)
-                    #
-                    print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
+                        outputs = self.model(noisy_img)
+                        val_loss = self.objective(outputs, clean_img)
 
+                        # Detach tensors and move to CPU before updating metrics to avoid
+                        # holding the computation graph or GPU memory across batches
+                        self.update_metrics(val_loss.detach().cpu(), clean_img.detach().cpu(), outputs.detach().cpu())
+                        #
+                        print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
+
+                # print and reset metrics
                 for metric in self.metrics:
                     print(f'{metric.name}: {metric.result():.4f}')
                     m_dict.update({f'val_{metric.name}': metric.result()})
-                    # reset state
                     metric.reset_states()
+
+                # ensure we go back to training mode after validation
+                self.model.train()
 
             # log metrics
             for metric_name, metric_value in m_dict.items():
