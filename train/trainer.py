@@ -25,6 +25,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        image_size=(256,256),
                        voxel_size=(2,2,2),
                        learning_rate=1e-3,
+                       conv_layer_type='standard',
                        num_workers=10,
                        seed=42):
         if binsimu is None:
@@ -43,6 +44,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.voxel_size = voxel_size
         self.learning_rate = learning_rate
         self.seed = seed
+
+        self.conv_layer_type = conv_layer_type
 
         self.num_workers = num_workers
 
@@ -79,7 +82,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
-        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type='separable')
+        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type=self.conv_layer_type)
         model = model.to(self.device)
         return model
 
