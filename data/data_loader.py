@@ -10,7 +10,17 @@ from phantom_simulation.sinogram_simulator import SinogramSimulator
 
 class SinogramGenerator(Dataset):
 
-    def __init__(self, binsimu, dest_path='./', length=10, image_size=(256,256), voxel_size=(2,2,2), seed=None):
+    def __init__(self,
+                binsimu,
+                dest_path='./',
+                length=10,
+                image_size=(256,256),
+                voxel_size=(2,2,2),
+                scatter_component=0.4,
+                random_component=0.35,
+                gaussian_PSF=4.,
+                nb_count=3e6,
+                seed=None):
         self.binsimu = binsimu
         if not os.path.exists(dest_path):
             os.makedirs(dest_path)
@@ -18,6 +28,11 @@ class SinogramGenerator(Dataset):
         self.length = length
         self.image_size = image_size
         self.voxel_size = voxel_size
+        self.scatter_component = scatter_component
+        self.random_component = random_component
+        self.gaussian_PSF = gaussian_PSF
+        self.nb_count = nb_count
+        #
         self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size)
         if seed is None:
             self.seed = random.randint(0, 1e32)
@@ -33,6 +48,10 @@ class SinogramGenerator(Dataset):
         return hash((
                      tuple(self.image_size),
                      tuple(self.voxel_size),
+                     self.scatter_component,
+                     self.random_component,
+                     self.gaussian_PSF,
+                     self.nb_count,
                      self.seed)) & 0xffffffff
 
     def normalize(self, x):
@@ -55,7 +74,20 @@ class SinogramGenerator(Dataset):
             # Generate phantom
             obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
             # Simulate sinogram
-            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
+            if isinstance(self.random_component, (list, tuple)):
+                random_component = random.uniform(self.random_component[0], self.random_component[1])
+            if isinstance(self.scatter_component, (list, tuple)):
+                scatter_component = random.uniform(self.scatter_component[0], self.scatter_component[1])
+            if isinstance(self.gaussian_PSF, (list, tuple)):
+                gaussian_PSF = random.uniform(self.gaussian_PSF[0], self.gaussian_PSF[1])
+            if isinstance(self.nb_count, (list, tuple)):
+                nb_count = random.randint(self.nb_count[0], self.nb_count[1])
+            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path, simulate_args={
+                "scatter_component": scatter_component,
+                "random_component": random_component,
+                "gaussian_PSF": gaussian_PSF,
+                "nb_count": nb_count
+            })
 
         # Read hdr file to get matrix size
         with open(f'{dest_path}/simu/simu_nfpt.s.hdr', 'r') as f:
