@@ -38,12 +38,12 @@ class SinogramGenerator(Dataset):
     def normalize(self, x):
         return (x - torch.min(x)) / (torch.max(x) - torch.min(x))
 
-    def generate_sample(self, idx, attempt=0):
+    def generate_sample(self, idx):
 
         # Set seeds
-        torch.manual_seed(self.seed + idx + attempt)
-        torch.cuda.manual_seed_all(self.seed + idx + attempt)
-        self.phantom_generator.set_seed(self.seed + idx + attempt)
+        torch.manual_seed(self.seed + idx)
+        torch.cuda.manual_seed_all(self.seed + idx)
+        self.phantom_generator.set_seed(self.seed + idx)
 
         # Create unique hashcode for data sample with idx and dataset generator hashcode
         data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
@@ -52,19 +52,10 @@ class SinogramGenerator(Dataset):
         dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
         if not os.path.exists(f'{dest_path}/simu/simu_nfpt.s.hdr'):
 
-            try:
-                # Generate phantom
-                obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
-                # Simulate sinogram
-                self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
-            except Exception as e:
-                print(f'Error generating sample {idx} (attempt {attempt}): {e}')
-                shutil.rmtree(dest_path, ignore_errors=True)
-                if attempt < 5:
-                    return self.generate_sample(idx, attempt=attempt+1)
-                else:
-                    print(f'Failed to generate sample {idx} after 5 attempts with error: {e}')
-                    raise e
+            # Generate phantom
+            obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
+            # Simulate sinogram
+            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
 
         # Read hdr file to get matrix size
         with open(f'{dest_path}/simu/simu_nfpt.s.hdr', 'r') as f:
