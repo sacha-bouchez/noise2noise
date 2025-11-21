@@ -27,6 +27,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        learning_rate=1e-3,
                        conv_layer_type='standard',
                        num_workers=10,
+                       L2_weight=1e-4,
                        seed=42):
         if binsimu is None:
             self.binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
@@ -48,6 +49,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.conv_layer_type = conv_layer_type
 
         self.num_workers = num_workers
+        self.L2_weight = L2_weight
 
         self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
 
@@ -74,6 +76,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
         loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
         return loader_train, loader_val
+
+    def get_optimizer(self, learning_rate=1e-3):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=self.L2_weight)
+        return optimizer
 
     def get_signature(self):
         sample = self.dataset_train.__getitem__(0)[0]
