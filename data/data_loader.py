@@ -38,7 +38,7 @@ class SinogramGenerator(Dataset):
     def normalize(self, x):
         return (x - torch.min(x)) / (torch.max(x) - torch.min(x))
 
-    def generate_sample(self, idx):
+    def simulate_sinogram(self, idx):
 
         # Set seeds
         torch.manual_seed(self.seed + idx)
@@ -70,6 +70,14 @@ class SinogramGenerator(Dataset):
             data_nfpt = torch.frombuffer(f.read(), dtype=torch.float32)
             data_nfpt = data_nfpt.reshape((n_y, n_x))
 
+        return dest_path, data_nfpt
+
+
+    def generate_sample(self, idx):
+
+        # Simulate sinogram
+        _, data_nfpt = self.simulate_sinogram(idx)
+
         # Generate 2 Poisson noisy versions
         data_noisy_1 = torch.poisson(data_nfpt)
         data_noisy_2 = torch.poisson(data_nfpt)
@@ -85,6 +93,41 @@ class SinogramGenerator(Dataset):
 
         noisy_1, noisy_2, clean = self.generate_sample(idx)
         return noisy_1, noisy_2, clean
+
+class SinogramGeneratorReconstructionTest(SinogramGenerator):
+
+    """
+    This generator is quite different in the sense that it is aimed to evaluate post-denoising reconstruction.
+    Therefore, it only generates one noisy sinogram and the clean ground truth image (not clean sinogram).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def generate_sample(self, idx):
+
+        # Simulate sinogram
+        dest_path, data_nfpt = self.simulate_sinogram(idx)
+        
+        # Read Image ground truth
+        with open(f'{dest_path}/object/object.img', 'rb') as f:
+            object_gth = torch.frombuffer(f.read(), dtype=torch.float32)
+            object_gth = object_gth.reshape(self.image_size)
+
+        # Generate 1 Poisson noisy version
+        data_noisy = torch.poisson(data_nfpt)
+
+        # Normalize
+        noisy_range = (torch.min(data_noisy) , torch.max(data_noisy)) # useful for reconstruction scaling
+        data_noisy = self.normalize(data_noisy)
+        object_gth = self.normalize(object_gth)
+
+        return dest_path, data_noisy, noisy_range, data_nfpt, object_gth
+
+    def __getitem__(self, idx):
+
+        dest_path, noisy, noisy_range, sinogram_clean, image_clean = self.generate_sample(idx)
+        return dest_path, noisy, noisy_range, sinogram_clean, image_clean        
 
 if __name__ == '__main__':
 
