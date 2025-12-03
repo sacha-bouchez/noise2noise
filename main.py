@@ -1,6 +1,7 @@
 import os
 import mlflow
 import datetime
+import torchsummary
 from train.trainer import Noise2NoiseTrainer
 
 if __name__ == "__main__":
@@ -11,18 +12,20 @@ if __name__ == "__main__":
         dataset_train_size=2048,
         dataset_val_size=512,
         val_freq=1,
-        n_epochs=15,
+        n_epochs=25,
         batch_size=8,
         metrics_configs=[
             ['PSNR', {'max_val': 1.0}],
-            ['Mean', {'name': 'loss'}],
             ['SSIM', {'max_val': 1.0}],
         ],
         shuffle=True,
         image_size=[256, 256],
         voxel_size=[2, 2, 2],
         learning_rate=1e-4,
+        L2_weight=0.0,
+        objective_type='poisson',
         num_workers=10,
+        conv_layer_type='standard',
         seed=42
     )
 
@@ -30,11 +33,12 @@ if __name__ == "__main__":
     mlflow.set_tracking_uri("http://mlflow:5000")
     #
     # create experiment if not exists
-    experiment = mlflow.get_experiment_by_name("Noise2Noise_Poisson_2DPET")
+    experiment_name = "Noise2Noise_Poisson_2DPET_v2"
+    experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
-        mlflow.create_experiment("Noise2Noise_Poisson_2DPET")
-        experiment = mlflow.get_experiment_by_name("Noise2Noise_Poisson_2DPET")
-    mlflow.set_experiment("Noise2Noise_Poisson_2DPET")
+        mlflow.create_experiment(experiment_name)
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+    mlflow.set_experiment(experiment_name)
     #
     # find if there is a run to resume among not finished ones
     # the run shall have the same hash as the current trainer
@@ -63,5 +67,7 @@ if __name__ == "__main__":
                 pass
         # resume model and optimizer if possible
         trainer.load_model_and_optimizer(path="reboot_model")
+        #
+        torchsummary.summary(trainer.model, input_size=(1, trainer.image_size[0], trainer.image_size[1]))
         # start training
         trainer.fit()

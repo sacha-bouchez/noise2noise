@@ -11,6 +11,11 @@ from noise2noise.data.data_loader import SinogramGenerator
 from pytorcher.trainer import PytorchTrainer
 from pytorcher.models import UNet
 
+def normalize(x):
+    min_x = torch.min(x)
+    max_x = torch.max(x)
+    return (x - min_x) / (max_x - min_x)
+
 class Noise2NoiseTrainer(PytorchTrainer):
 
     def __init__(self, binsimu=None,
@@ -28,6 +33,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        conv_layer_type='standard',
                        num_workers=10,
                        L2_weight=1e-4,
+                       objective_type='MSE',
                        seed=42):
         if binsimu is None:
             self.binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
@@ -44,6 +50,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.image_size = image_size
         self.voxel_size = voxel_size
         self.learning_rate = learning_rate
+        self.objective_type = objective_type
         self.seed = seed
 
         self.conv_layer_type = conv_layer_type
@@ -52,6 +59,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.L2_weight = L2_weight
 
         self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
+
+        if f'loss_{self.objective_type}' not in metrics_configs:
+            metrics_configs.append(['Mean', {'name': f'loss_{self.objective_type}'}])
 
         super(Noise2NoiseTrainer, self).__init__(metrics=metrics_configs)
 
@@ -110,7 +120,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
             print("No reboot model found, training from scratch.")
 
     def get_objective(self):
-        objective = torch.nn.MSELoss()
+        type = self.objective_type.lower()
+        assert type in ['mse', 'poisson'], "Objective type not recognized. Supported types: 'MSE', 'Poisson'."
+        if type == 'mse':
+            objective = torch.nn.MSELoss()
+        elif type == 'poisson':
+            objective = torch.nn.PoissonNLLLoss()
         return objective
 
     def log_and_reset_metrics(self, epoch):
@@ -133,11 +148,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # TRAIN
             for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader_train):
 
-                # Move data to device
-                noisy_img1 = noisy_img1.to(self.device)
-                noisy_img2 = noisy_img2.to(self.device)
-                clean_img = clean_img.to(self.device)
-
                 # ensure channel dimension: dataset returns (B, H, W)
                 if noisy_img1.dim() == 3:
                     noisy_img1 = noisy_img1.unsqueeze(1)
@@ -146,19 +156,42 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 if clean_img.dim() == 3:
                     clean_img = clean_img.unsqueeze(1)
 
-                noisy_img1 = noisy_img1.float()
-                noisy_img2 = noisy_img2.float()
+                # Always normalize network input
+                scaled_noisy_img1 = normalize(noisy_img1)
+                scaled_noisy_img2 = normalize(noisy_img2)
+                
+                # Move data to device
+                scaled_noisy_img1 = scaled_noisy_img1.to(self.device)
+                noisy_img1 = noisy_img1.to(self.device)
+                scaled_noisy_img2 = scaled_noisy_img2.to(self.device)
+                noisy_img2 = noisy_img2.to(self.device)
+                clean_img = clean_img.to(self.device)
+
+                scaled_noisy_img1 = scaled_noisy_img1.float()
+                scaled_noisy_img2 = scaled_noisy_img2.float()
                 clean_img = clean_img.float()
 
-                outputs = self.model(noisy_img1)
+                # output_1, output_2 = self.model(noisy_img1), self.model(noisy_img2)
 
-                loss = self.objective(outputs, noisy_img2)
+                output_1 = self.model(scaled_noisy_img1)
+                loss_1 = self.objective(output_1, noisy_img2)
+                self.update_metrics(loss_1, clean_img, output_1)
+                # free up memory
+                del output_1
+                torch.cuda.empty_cache()
+
+                output_2 = self.model(scaled_noisy_img2)
+                loss_2 = self.objective(output_2, noisy_img1)
+                self.update_metrics(loss_2, clean_img, output_2)
+                # free up memory
+                del output_2
+                torch.cuda.empty_cache()
+
+                loss = 1/2 * ( loss_1 + loss_2 ) # NOTE the .5 factor is used for learning rate scaling consistency with standard supervised training
                 # Backpropagation
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-
-                self.update_metrics(loss, clean_img, outputs)
                 #
                 print(f'Epoch [{epoch+1}/{self.n_epochs}], Train,  Step [{batch_idx+1}/{len(self.loader_train)}]')
 

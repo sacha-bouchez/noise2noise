@@ -35,8 +35,6 @@ class SinogramGenerator(Dataset):
                      tuple(self.voxel_size),
                      self.seed)) & 0xffffffff
 
-    def normalize(self, x):
-        return (x - torch.min(x)) / (torch.max(x) - torch.min(x))
 
     def simulate_sinogram(self, idx):
 
@@ -82,10 +80,6 @@ class SinogramGenerator(Dataset):
         data_noisy_1 = torch.poisson(data_nfpt)
         data_noisy_2 = torch.poisson(data_nfpt)
 
-        # Normalize
-        data_noisy_1 = self.normalize(data_noisy_1)
-        data_noisy_2 = self.normalize(data_noisy_2)
-        data_nfpt = self.normalize(data_nfpt)
 
         return data_noisy_1, data_noisy_2, data_nfpt
 
@@ -117,10 +111,12 @@ class SinogramGeneratorReconstructionTest(SinogramGenerator):
         # Generate 1 Poisson noisy version
         data_noisy = torch.poisson(data_nfpt)
 
-        # Normalize
-        noisy_range = (torch.min(data_noisy) , torch.max(data_noisy)) # useful for reconstruction scaling
-        data_noisy = self.normalize(data_noisy)
-        object_gth = self.normalize(object_gth)
+        # # Normalize
+        # noisy_range = (torch.min(data_noisy) , torch.max(data_noisy)) # useful for reconstruction scaling
+        # data_noisy = self.normalize(data_noisy)
+        # object_gth = self.normalize(object_gth)
+
+        # TODO update reconstruction pipeline assuming that the model output is not restricted to [0, 1]
 
         return dest_path, data_noisy, noisy_range, data_nfpt, object_gth
 
