@@ -121,7 +121,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         if type == 'mse':
             objective = torch.nn.MSELoss()
         elif type == 'poisson':
-            objective = torch.nn.PoissonNLLLoss()
+            objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='mean')
         return objective
 
     def log_and_reset_metrics(self, epoch):
