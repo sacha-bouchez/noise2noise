@@ -137,6 +137,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def fit(self):
 
+        monitored_metrics = [ 'val_psnr' ]
+
         for epoch in range(self.initial_epoch, self.n_epochs):
 
             m_dict = {}
@@ -226,6 +228,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     m_dict.update({f'val_{metric.name}': metric.result()})
                     metric.reset_states()
 
+                # metric monitoring
+                for metric_name in monitored_metrics:
+                    self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name])
+
                 # ensure we go back to training mode after validation
                 self.model.train()
 
@@ -234,15 +240,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 mlflow.log_metric(metric_name, metric_value, step=epoch+1)
 
             # log reboot model as artifact
-            os.makedirs("/tmp/reboot_model", exist_ok=True)
-            torch.save(self.model.state_dict(), f"/tmp/reboot_model/reboot_model.pth")
-            with open(f"/tmp/reboot_model/epoch.txt", "w") as f:
-                f.write(str(epoch))
-            mlflow.log_artifact(f"/tmp/reboot_model/reboot_model.pth", artifact_path="reboot_model")
-            mlflow.log_artifact(f"/tmp/reboot_model/epoch.txt", artifact_path="reboot_model")
-            # save optimizer state
-            torch.save(self.optimizer.state_dict(), f"/tmp/reboot_model/optimizer.pth")
-            mlflow.log_artifact(f"/tmp/reboot_model/optimizer.pth", artifact_path="reboot_model")
+            self.mlflow_log_model_as_artifact(epoch, artifact_path="reboot_model")
 
-        # log final model
-        mlflow.pytorch.log_model(self.model, artifact_path="model", registered_model_name="Noise2Noise_2DPET_Model")
+        # log final best models
+        for metric_name in monitored_metrics:
+            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"Noise2Noise_2DPET_Model_{metric_name}")
