@@ -98,22 +98,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
         model = model.to(self.device)
         return model
 
-    def load_model_and_optimizer(self, path="reboot_model"):
-        #
-        try:
-            mlflow.artifacts.download_artifacts(artifact_path=path, dst_path="/tmp/reboot_model", run_id=mlflow.active_run().info.run_id)
-        except mlflow.exceptions.MlflowException:
-            print("No reboot model found in mlflow artifacts.")
-            return
-        #
-        if os.path.exists("/tmp/reboot_model/reboot_model.pth") and os.path.exists("/tmp/reboot_model/epoch.txt") and os.path.exists("/tmp/reboot_model/optimizer.pth"):
-            self.model.load_state_dict(torch.load("/tmp/reboot_model/reboot_model.pth"))
-            with open("/tmp/reboot_model/epoch.txt", "r") as f:
-                self.initial_epoch = int(f.read()) + 1
-            self.optimizer.load_state_dict(torch.load("/tmp/reboot_model/optimizer.pth"))
-            print(f"Rebooted model from epoch {self.initial_epoch}")
-        else:
-            print("No reboot model found, training from scratch.")
 
     def get_objective(self):
         type = self.objective_type.lower()
