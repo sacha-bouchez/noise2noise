@@ -10,11 +10,7 @@ from noise2noise.data.data_loader import SinogramGenerator
 
 from pytorcher.trainer import PytorchTrainer
 from pytorcher.models import UNet
-
-def normalize(x):
-    min_x = torch.min(x)
-    max_x = torch.max(x)
-    return (x - min_x) / (max_x - min_x)
+from pytorcher.utils.processing import normalize_batch
 
 class Noise2NoiseTrainer(PytorchTrainer):
 
@@ -98,7 +94,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
-        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type=self.conv_layer_type)
+        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type=self.conv_layer_type, normalize_input=True)
         model = model.to(self.device)
         return model
 
@@ -155,37 +151,31 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     noisy_img2 = noisy_img2.unsqueeze(1)
                 if clean_img.dim() == 3:
                     clean_img = clean_img.unsqueeze(1)
-
-                # Always normalize network input
-                scaled_noisy_img1 = normalize(noisy_img1)
-                scaled_noisy_img2 = normalize(noisy_img2)
                 
                 # Move data to device
-                scaled_noisy_img1 = scaled_noisy_img1.to(self.device)
                 noisy_img1 = noisy_img1.to(self.device)
-                scaled_noisy_img2 = scaled_noisy_img2.to(self.device)
                 noisy_img2 = noisy_img2.to(self.device)
                 clean_img = clean_img.to(self.device)
 
-                scaled_noisy_img1 = scaled_noisy_img1.float()
-                scaled_noisy_img2 = scaled_noisy_img2.float()
+                noisy_img1 = noisy_img1.float()
+                noisy_img2 = noisy_img2.float()
                 clean_img = clean_img.float()
 
-                # output_1, output_2 = self.model(noisy_img1), self.model(noisy_img2)
+                def inference_pair_and_loss(noisy_img_a, noisy_img_b):
+                    """ Perform inference with a as input and b as target, and compute loss """
+                    output = self.model(noisy_img_a)
+                    if self.objective_type.lower() == 'poisson':
+                        loss = self.objective(output, noisy_img_b)
+                    elif self.objective_type.lower() == 'mse':
+                        loss = self.objective(normalize_batch(output), normalize_batch(noisy_img_b))
+                    self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output))
+                    # free up memory
+                    del output
+                    torch.cuda.empty_cache()
+                    return loss
 
-                output_1 = self.model(scaled_noisy_img1)
-                loss_1 = self.objective(output_1, noisy_img2)
-                self.update_metrics(loss_1, clean_img, output_1)
-                # free up memory
-                del output_1
-                torch.cuda.empty_cache()
-
-                output_2 = self.model(scaled_noisy_img2)
-                loss_2 = self.objective(output_2, noisy_img1)
-                self.update_metrics(loss_2, clean_img, output_2)
-                # free up memory
-                del output_2
-                torch.cuda.empty_cache()
+                loss_1 = inference_pair_and_loss(noisy_img1, noisy_img2)
+                loss_2 = inference_pair_and_loss(noisy_img2, noisy_img1)
 
                 loss = 1/2 * ( loss_1 + loss_2 ) # NOTE the .5 factor is used for learning rate scaling consistency with standard supervised training
                 # Backpropagation
@@ -219,12 +209,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         clean_img = clean_img.float()
 
                         outputs = self.model(noisy_img)
-                        val_loss = self.objective(outputs, clean_img)
+                        if self.objective_type.lower() == 'poisson':
+                            val_loss = self.objective(outputs, noisy_img)
+                        elif self.objective_type.lower() == 'mse':
+                            val_loss = self.objective(normalize_batch(outputs), normalize_batch(clean_img))
 
                         # Detach tensors and move to CPU before updating metrics to avoid
                         # holding the computation graph or GPU memory across batches
-                        self.update_metrics(val_loss.detach().cpu(), clean_img.detach().cpu(), outputs.detach().cpu())
-                        #
+                        self.update_metrics(val_loss.detach().cpu(), normalize_batch(clean_img).detach().cpu(), normalize_batch(outputs).detach().cpu())
+                        
                         print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
 
                 # print and reset metrics

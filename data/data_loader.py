@@ -111,19 +111,12 @@ class SinogramGeneratorReconstructionTest(SinogramGenerator):
         # Generate 1 Poisson noisy version
         data_noisy = torch.poisson(data_nfpt)
 
-        # # Normalize
-        # noisy_range = (torch.min(data_noisy) , torch.max(data_noisy)) # useful for reconstruction scaling
-        # data_noisy = self.normalize(data_noisy)
-        # object_gth = self.normalize(object_gth)
-
-        # TODO update reconstruction pipeline assuming that the model output is not restricted to [0, 1]
-
-        return dest_path, data_noisy, noisy_range, data_nfpt, object_gth
+        return dest_path, data_noisy, data_nfpt, object_gth
 
     def __getitem__(self, idx):
 
-        dest_path, noisy, noisy_range, sinogram_clean, image_clean = self.generate_sample(idx)
-        return dest_path, noisy, noisy_range, sinogram_clean, image_clean        
+        dest_path, noisy, sinogram_clean, image_clean = self.generate_sample(idx)
+        return dest_path, noisy, sinogram_clean, image_clean        
 
 if __name__ == '__main__':
 

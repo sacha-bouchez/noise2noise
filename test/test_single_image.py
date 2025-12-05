@@ -62,15 +62,6 @@ class SingleImageInferencePipeline(PytorchTrainer):
         self.img_path = img_path
         self.img_att_path = img_att_path
 
-    def normalize(self, tensor):
-        """
-        Normalize tensor to [0, 1].
-        """
-        min_val = torch.min(tensor)
-        max_val = torch.max(tensor)
-        tensor_norm = (tensor - min_val) / (max_val - min_val)
-        return tensor_norm
-
     def get_simulator(self):
         self.sinogram_simulator = SinogramSimulator(binsimu=self.binsimu, save_castor=True, seed=self.seed)
         return self.sinogram_simulator
@@ -152,22 +143,20 @@ class SingleImageInferencePipeline(PytorchTrainer):
         sinogram_noisy = read_castor_binary_file(os.path.join(self.dest_path, 'simu', 'simu_pt.s.hdr'), reader='numpy')
 
         # Normalize noisy sinogram to [0, 1]
-        sinogram_noisy_norm = self.normalize(torch.from_numpy(sinogram_noisy).float())
+        sinogram_noisy = torch.from_numpy(sinogram_noisy).float()
 
         # Perform denoising inference
         with torch.no_grad():
-            sinogram_noisy_norm = sinogram_noisy_norm.to(self.device)
-            if sinogram_noisy_norm.dim() == 3:
-                sinogram_noisy_norm = sinogram_noisy_norm.unsqueeze(1)  # add channel dimension
-            denoised_sinogram = self.model(sinogram_noisy_norm)
+            sinogram_noisy = sinogram_noisy.to(self.device)
+            if sinogram_noisy.dim() == 3:
+                sinogram_noisy = sinogram_noisy.unsqueeze(1)  # add channel dimension
+            denoised_sinogram = self.model(sinogram_noisy)
             denoised_sinogram = denoised_sinogram.cpu()
 
         # Transform it back to numpy array
         denoised_sinogram = denoised_sinogram.squeeze(1).numpy()
 
         # post-process denoised sinogram
-        denoised_sinogram = np.clip(denoised_sinogram, 0, 1)
-        denoised_sinogram = denoised_sinogram * (self.noisy_range[1] - self.noisy_range[0]) + self.noisy_range[0]
         denoised_sinogram = denoised_sinogram.round().astype(np.int16)
 
         # plot snograms

@@ -8,6 +8,7 @@ import copy
 from pytorcher.trainer.pytorch_trainer import PytorchTrainer
 from noise2noise.data.data_loader import SinogramGeneratorReconstructionTest
 from pet_recon.castor_reconstructor import CastorPetReconstruction
+from tools.image.metrics import PSNR
 
 
 class InferencePipeline(PytorchTrainer):
@@ -85,15 +86,6 @@ class InferencePipeline(PytorchTrainer):
         loader_test = DataLoader(self.dataset_test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
         return loader_test
 
-    def normalize(self, tensor):
-        """
-        Normalize tensor to [0, 1].
-        """
-        min_val = torch.min(tensor)
-        max_val = torch.max(tensor)
-        tensor_norm = (tensor - min_val) / (max_val - min_val)
-        return tensor_norm
-
     def run(self):
 
         def reconstruct_batch_image(dest_path, sinogram, is_sinogram_denoised):
@@ -131,18 +123,11 @@ class InferencePipeline(PytorchTrainer):
                         recon_image = torch.frombuffer(f.read(), dtype=torch.float32)
                         recon_image = recon_image.reshape(self.image_size)
                         # Compute PSNR between reconstructed image and image ground truth
-                        PSNRs.append(10 * torch.log10(1.0 / torch.mean((recon_image - object_ground_truth[i]) ** 2)).item())
+                        PSNRs.append(PSNR(object_ground_truth.select(0, i).numpy(), recon_image))
                         # update result
                         if out is None or PSNRs[-1] > max_PSNR:
                             out = recon_image
                             max_PSNR = PSNRs[-1]
-
-                # with open(f'{dest_path_recon}/recon_it{iterations}.img', 'rb') as f:
-                #     recon_image = torch.frombuffer(f.read(), dtype=torch.float32)
-                #     recon_image = recon_image.reshape(self.image_size)
-
-                # normalize reconstructed image
-                out = self.normalize(out)
 
                 # add image to batch
                 reconstructed_images.append(out)
@@ -152,7 +137,7 @@ class InferencePipeline(PytorchTrainer):
 
         self.reset_metrics()
 
-        for batch_idx, (dest_path, noisy_sinogram, noisy_range, _, object_ground_truth) in enumerate(self.data_loader_test):
+        for batch_idx, (dest_path, noisy_sinogram, _, object_ground_truth) in enumerate(self.data_loader_test):
 
             print(f'Processing batch {batch_idx+1}/{len(self.data_loader_test)}')
 
@@ -167,13 +152,6 @@ class InferencePipeline(PytorchTrainer):
 
             # remove channel dimension
             denoised_sinogram = denoised_sinogram.squeeze(1)
-            # rescale denoised sinogram to original noisy range
-            min_noisy, max_noisy = noisy_range
-            for b in range(denoised_sinogram.shape[0]):
-                denoised_sinogram[b] = denoised_sinogram[b] * (max_noisy[b] - min_noisy[b]) + min_noisy[b]
-            # rescale noisy sinogram to original range
-            for b in range(noisy_sinogram.shape[0]):
-                noisy_sinogram[b] = noisy_sinogram[b] * (max_noisy[b] - min_noisy[b]) + min_noisy[b]
             #
             # cast as 16-bit signed integer for reconstruction
             denoised_sinogram = denoised_sinogram.clamp(min=0).round().to(torch.int16)
@@ -184,9 +162,9 @@ class InferencePipeline(PytorchTrainer):
             # compute metrics
             for metric in self.metrics:
                 if 'noisy_recon_' in metric.name:
-                    metric.update_state(object_ground_truth, reconstructed_images_noisy)
+                    metric.update_state(normalize_batch(object_ground_truth), normalize_batch(reconstructed_images_noisy))
                 elif 'denoised_recon_' in metric.name:
-                    metric.update_state(object_ground_truth, reconstructed_images_denoised)
+                    metric.update_state(normalize_batch(object_ground_truth), normalize_batch(reconstructed_images_denoised))
 
         # log metrics
         for metric in self.metrics:
