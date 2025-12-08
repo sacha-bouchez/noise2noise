@@ -66,7 +66,7 @@ if __name__ == "__main__":
             except:
                 pass
         # resume model and optimizer if possible
-        trainer.load_model_and_optimizer(path="reboot_model")
+        trainer.load_model_and_optimizer(artifact_path="reboot_model")
         #
         torchsummary.summary(trainer.model, input_size=(1, trainer.image_size[0], trainer.image_size[1]))
         # start training
