@@ -159,14 +159,6 @@ class SingleImageInferencePipeline(PytorchTrainer):
         # post-process denoised sinogram
         denoised_sinogram = denoised_sinogram.round().astype(np.int16)
 
-        # plot snograms
-        fig, ax = plt.subplots(1,2)
-        ax[0].imshow(sinogram_noisy.squeeze(), cmap='gray')
-        ax[0].set_title('Noisy Sinogram')
-        ax[1].imshow(denoised_sinogram.squeeze(), cmap='gray')
-        ax[1].set_title('Denoised Sinogram')
-        plt.savefig(os.path.join(self.dest_path, 'sinograms_comparison.png'), dpi=300)
-        plt.show()
 
         # Overwrite prompt sinogram with denoised sinogram
         self.overwrite_prompt_sinogram(denoised_sinogram)
@@ -184,8 +176,8 @@ if __name__ == "__main__":
     dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
 
     inference_pipeline = SingleImageInferencePipeline(
-        model_name="Noise2Noise_2DPET_Model",
-        model_version=10,
+        model_name="Noise2Noise_2DPET_Model_val_psnr",
+        model_version=1,
         metrics_configs=[
             ['PSNR', {}],
             ['SSIM', {}]
@@ -205,78 +197,78 @@ if __name__ == "__main__":
 
     inference_pipeline.run()
 
-    # # plot PSNR against iterations for noisy and denoised reconstruction
-    # import matplotlib.pyplot as plt
+    # plot PSNR against iterations for noisy and denoised reconstruction
+    import matplotlib.pyplot as plt
 
-    # # Read ground truth image
-    # gt_image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
+    # Read ground truth image
+    gt_image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
     
-    # PSNRs_denoised = []
-    # SSIMs_denoised = []
-    # PSNRs_noisy = []
-    # SSIMs_noisy = []
-    # it = 1
-    # while os.path.isfile(os.path.join(dest_path, 'recon_denoised', f'recon_it{it}.hdr')) and \
-    #         os.path.isfile(os.path.join(dest_path, 'recon_noisy', f'recon_it{it}.hdr')):
+    PSNRs_denoised = []
+    SSIMs_denoised = []
+    PSNRs_noisy = []
+    SSIMs_noisy = []
+    it = 1
+    while os.path.isfile(os.path.join(dest_path, 'recon_denoised', f'recon_it{it}.hdr')) and \
+            os.path.isfile(os.path.join(dest_path, 'recon_noisy', f'recon_it{it}.hdr')):
 
-    #     recon_denoised = read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', f'recon_it{it}.hdr'), reader='numpy')
-    #     recon_noisy = read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', f'recon_it{it}.hdr'), reader='numpy')
+        recon_denoised = read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', f'recon_it{it}.hdr'), reader='numpy')
+        recon_noisy = read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', f'recon_it{it}.hdr'), reader='numpy')
 
-    #     PSNR_denoised = PSNR(I=gt_image, K=recon_denoised)
-    #     PSNR_noisy = PSNR(I=gt_image, K=recon_noisy)
+        PSNR_denoised = PSNR(I=gt_image, K=recon_denoised)
+        PSNR_noisy = PSNR(I=gt_image, K=recon_noisy)
 
-    #     SSIM_denoised = SSIM(img1=gt_image, img2=recon_denoised)
-    #     SSIM_noisy = SSIM(img1=gt_image, img2=recon_noisy)
+        SSIM_denoised = SSIM(img1=gt_image, img2=recon_denoised)
+        SSIM_noisy = SSIM(img1=gt_image, img2=recon_noisy)
 
-    #     PSNRs_denoised.append(PSNR_denoised)
-    #     PSNRs_noisy.append(PSNR_noisy)
-    #     SSIMs_denoised.append(SSIM_denoised)
-    #     SSIMs_noisy.append(SSIM_noisy)
+        PSNRs_denoised.append(PSNR_denoised)
+        PSNRs_noisy.append(PSNR_noisy)
+        SSIMs_denoised.append(SSIM_denoised)
+        SSIMs_noisy.append(SSIM_noisy)
 
-    #     it += 1
+        it += 1
 
-    # fig, ax1 = plt.subplots()
-    # ax1.plot(range(1, it), PSNRs_denoised, label='Denoised Reconstruction PSNR', color='black')
-    # ax1.plot(range(1, it), PSNRs_noisy, label='Noisy Reconstruction PSNR', color=(0/255, 102/255, 204/255))
+    fig, ax1 = plt.subplots()
+    ax1.plot(range(1, it), PSNRs_denoised, label='Denoised Reconstruction PSNR', color='black')
+    ax1.plot(range(1, it), PSNRs_noisy, label='Noisy Reconstruction PSNR', color=(0/255, 102/255, 204/255))
 
-    # ax1.set_xlabel('Iterations')
-    # ax1.set_ylabel('PSNR (dB)')
+    ax1.set_xlabel('Iterations')
+    ax1.set_ylabel('PSNR (dB)')
 
 
-    # ax2 = ax1.twinx()
-    # ax2.plot(range(1, it), SSIMs_denoised, label='Denoised Reconstruction SSIM', linestyle='--', color='black')
-    # ax2.plot(range(1, it), SSIMs_noisy, label='Noisy Reconstruction SSIM', linestyle='--', color=(0/255, 102/255, 204/255))
-    # ax2.set_xlabel('Iterations')
-    # ax2.set_ylabel('SSIM')
-    # ax2.set_xlabel('Iterations')
-    # plt.suptitle('PSNR and SSIM vs Iterations for Noisy and Denoised Reconstruction')
-    # # legend
-    # lines_1, labels_1 = ax1.get_legend_handles_labels()
-    # lines_2, labels_2 = ax2.get_legend_handles_labels()
-    # ax1.legend(lines_1 + lines_2, labels_1 + labels_2)
-    # ax1.grid()
-    # plt.savefig(os.path.join(dest_path, 'psnr_vs_iterations_OSEM.png'))
+    ax2 = ax1.twinx()
+    ax2.plot(range(1, it), SSIMs_denoised, label='Denoised Reconstruction SSIM', linestyle='--', color='black')
+    ax2.plot(range(1, it), SSIMs_noisy, label='Noisy Reconstruction SSIM', linestyle='--', color=(0/255, 102/255, 204/255))
+    ax2.set_xlabel('Iterations')
+    ax2.set_ylabel('SSIM')
+    ax2.set_xlabel('Iterations')
+    plt.suptitle('PSNR and SSIM vs Iterations for Noisy and Denoised Reconstruction')
+    # legend
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2)
+    ax1.grid()
+    plt.savefig(os.path.join(dest_path, 'psnr_vs_iterations_OSEM.png'))
     
-    # def plot_reconstructions_at_it(it):
-    #     if isinstance(it, int):
-    #         it = (it, it)
-    #     fig, ax = plt.subplots(1,2, figsize=(10,5))
-    #     recon_denoised_last = np.squeeze(read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', f'recon_it{it[0]}.hdr'), reader='numpy'))
-    #     recon_noisy_last = np.squeeze(read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', f'recon_it{it[1]}.hdr'), reader='numpy'))
+    def plot_reconstructions_at_it(it):
+        if isinstance(it, int):
+            it = (it, it)
+        fig, ax = plt.subplots(1,2, figsize=(10,5))
+        recon_denoised_last = np.squeeze(read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', f'recon_it{it[0]}.hdr'), reader='numpy'))
+        recon_noisy_last = np.squeeze(read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', f'recon_it{it[1]}.hdr'), reader='numpy'))
 
-    #     ax[0].imshow(recon_denoised_last, cmap='gray')
-    #     ax[0].set_title(f'Denoised Reconstruction at iteration ({it[0]})\nPSNR: {PSNRs_denoised[-1]:.2f} dB, SSIM: {SSIMs_denoised[-1]:.4f}')
-    #     ax[0].axis('off')
+        ax[0].imshow(recon_denoised_last, cmap='gray')
+        ax[0].set_title(f'Denoised Reconstruction at iteration ({it[0]})\nPSNR: {PSNRs_denoised[-1]:.2f} dB, SSIM: {SSIMs_denoised[-1]:.4f}')
+        ax[0].axis('off')
 
-    #     ax[1].imshow(recon_noisy_last, cmap='gray')
-    #     ax[1].set_title(f'Noisy Reconstruction at iteration ({it[1]})\nPSNR: {PSNRs_noisy[-1]:.2f} dB, SSIM: {SSIMs_noisy[-1]:.4f}')
-    #     ax[1].axis('off')
+        ax[1].imshow(recon_noisy_last, cmap='gray')
+        ax[1].set_title(f'Noisy Reconstruction at iteration ({it[1]})\nPSNR: {PSNRs_noisy[-1]:.2f} dB, SSIM: {SSIMs_noisy[-1]:.4f}')
+        ax[1].axis('off')
 
-    #     plt.savefig(os.path.join(dest_path, f'recon_images_{it}_OSEM.png'))
+        plt.savefig(os.path.join(dest_path, f'recon_images_{it}_OSEM.png'))
 
 
 
-    # plot_reconstructions_at_it(it-1) # last iteration
-    # denoised_optimal_it = int(np.argmax(PSNRs_denoised) + 1)
-    # noisy_optimal_it = int(np.argmax(PSNRs_noisy) + 1)
-    # plot_reconstructions_at_it((denoised_optimal_it, noisy_optimal_it)) # optimal iteration based on PSNR
+    plot_reconstructions_at_it(it-1) # last iteration
+    denoised_optimal_it = int(np.argmax(PSNRs_denoised) + 1)
+    noisy_optimal_it = int(np.argmax(PSNRs_noisy) + 1)
+    plot_reconstructions_at_it((denoised_optimal_it, noisy_optimal_it)) # optimal iteration based on PSNR
