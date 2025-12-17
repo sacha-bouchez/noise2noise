@@ -5,16 +5,21 @@ import shutil
 import torch
 from torch.utils.data import Dataset
 
-from phantom_simulation.object_simulator import Phantom2DPetGenerator
-from phantom_simulation.sinogram_simulator import SinogramSimulator
+from pet_simulator import SinogramSimulatorCastor, SinogramSimulator
+from phantom_simulation import Phantom2DPetGenerator
+
+from tools.image.castor import read_castor_binary_file
 
 class SinogramGenerator(Dataset):
 
-    def __init__(self, binsimu, dest_path='./', length=10, image_size=(256,256), voxel_size=(2,2,2), seed=None):
-        self.binsimu = binsimu
-        if not os.path.exists(dest_path):
-            os.makedirs(dest_path)
-        self.dest_path = dest_path
+    def __init__(self, simulator_type, binsimu=None, dest_path='./', length=10, image_size=(256,256), voxel_size=(2,2,2), seed=None):
+        assert simulator_type in ['castor', 'toy'], "simulator_type must be either 'castor' or 'toy'"
+        if simulator_type == 'castor':
+            assert binsimu is not None, "binsimu path must be provided for castor simulator"
+            self.binsimu = binsimu
+        self.dest_path = os.path.join(dest_path, simulator_type)
+        if not os.path.exists(self.dest_path):
+            os.makedirs(self.dest_path)
         self.length = length
         self.image_size = image_size
         self.voxel_size = voxel_size
@@ -22,7 +27,10 @@ class SinogramGenerator(Dataset):
         if seed is None:
             self.seed = random.randint(0, 1e32)
         self.seed = seed
-        self.sinogram_simulator = SinogramSimulator(binsimu=binsimu, save_castor=False, seed=seed) # NOTE this seed is useless
+        if simulator_type == 'castor':
+            self.sinogram_simulator = SinogramSimulatorCastor(binsimu=binsimu, save_castor=False, seed=seed) # NOTE this seed is useless
+        else:
+            self.sinogram_simulator = SinogramSimulator(seed=seed)
         #
         self.hashcode = self.get_generator_hashcode()
 
@@ -56,17 +64,8 @@ class SinogramGenerator(Dataset):
             self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path)
 
         # Read hdr file to get matrix size
-        with open(f'{dest_path}/simu/simu_nfpt.s.hdr', 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                if line.startswith('matrix size [1]'):
-                    n_x = int(line.split('=')[1].strip())
-                if line.startswith('matrix size [2]'):
-                    n_y = int(line.split('=')[1].strip())
-        # Read Noise-Free Prompt data
-        with open(f'{dest_path}/simu/simu_nfpt.s', 'rb') as f:
-            data_nfpt = torch.frombuffer(f.read(), dtype=torch.float32)
-            data_nfpt = data_nfpt.reshape((n_y, n_x))
+        data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr').squeeze()
+        data_nfpt = torch.from_numpy(data_nfpt)
 
         return dest_path, data_nfpt
 

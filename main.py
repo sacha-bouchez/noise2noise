@@ -7,6 +7,7 @@ from train.trainer import Noise2NoiseTrainer
 if __name__ == "__main__":
 
     trainer = Noise2NoiseTrainer(
+        simulator_type='toy',
         binsimu=None,
         dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
         dataset_train_size=2048,
@@ -33,7 +34,7 @@ if __name__ == "__main__":
     mlflow.set_tracking_uri("http://mlflow:5000")
     #
     # create experiment if not exists
-    experiment_name = "Noise2Noise_Poisson_2DPET_v2"
+    experiment_name = "Noise2Noise_Poisson_2DPET_v2_toy"
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
         mlflow.create_experiment(experiment_name)

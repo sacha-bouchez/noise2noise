@@ -14,7 +14,9 @@ from pytorcher.utils.processing import normalize_batch
 
 class Noise2NoiseTrainer(PytorchTrainer):
 
-    def __init__(self, binsimu=None,
+    def __init__(self, 
+                       simulator_type='castor',
+                       binsimu=None,
                        dest_path='./',
                        dataset_train_size=10000,
                        dataset_val_size=500,
@@ -31,6 +33,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        L2_weight=1e-4,
                        objective_type='MSE',
                        seed=42):
+        self.simulator_type = simulator_type
         if binsimu is None:
             self.binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
         else:
@@ -64,7 +67,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_data_loader(self):
 
-        self.dataset_train = SinogramGenerator(self.binsimu,
+        self.dataset_train = SinogramGenerator(
+                                         self.simulator_type,
+                                         self.binsimu,
                                          dest_path=os.path.join(self.dest_path, 'train'),
                                          length=self.dataset_train_size,
                                          image_size=self.image_size,
@@ -73,7 +78,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
         loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
 
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
-        self.dataset_val = SinogramGenerator(self.binsimu,
+        self.dataset_val = SinogramGenerator(
+                                         self.simulator_type,
+                                         self.binsimu,
                                          dest_path=os.path.join(self.dest_path, 'val'),
                                          length=self.dataset_val_size,
                                          image_size=self.image_size,
@@ -97,7 +104,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
         model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type=self.conv_layer_type, normalize_input=True)
         model = model.to(self.device)
         return model
-
 
     def get_objective(self):
         type = self.objective_type.lower()

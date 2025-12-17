@@ -1,5 +1,5 @@
-from phantom_simulation.sinogram_simulator import SinogramSimulator
-from pet_recon.castor_reconstructor import CastorPetReconstruction
+from pet_simulator import SinogramSimulatorCastor
+from pet_recon import CastorPetReconstructor
 from pytorcher.trainer.pytorch_trainer import PytorchTrainer
 
 import matplotlib.pyplot as plt
@@ -63,11 +63,11 @@ class SingleImageInferencePipeline(PytorchTrainer):
         self.img_att_path = img_att_path
 
     def get_simulator(self):
-        self.sinogram_simulator = SinogramSimulator(binsimu=self.binsimu, save_castor=True, seed=self.seed)
+        self.sinogram_simulator = SinogramSimulatorCastor(binsimu=self.binsimu, save_castor=True, seed=self.seed)
         return self.sinogram_simulator
 
     def get_reconstructor(self):
-        self.reconstructor = CastorPetReconstruction(
+        self.reconstructor = CastorPetReconstructor(
             binrecon=self.binrecon,
             binsimu=self.binsimu,
             fout="recon",
@@ -117,6 +117,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
         iterations = 10
         subsets = 16
         self.reconstructor.run(
+            file_path=os.path.join(dest_path, 'data', 'data.cdh'),
             dest_path=dest_path,
             it=f"{iterations}:{subsets}",
             dim=(*self.image_size,1),
@@ -177,7 +178,7 @@ if __name__ == "__main__":
 
     inference_pipeline = SingleImageInferencePipeline(
         model_name="Noise2Noise_2DPET_Model_val_psnr",
-        model_version=1,
+        model_version=2,
         metrics_configs=[
             ['PSNR', {}],
             ['SSIM', {}]
@@ -257,11 +258,11 @@ if __name__ == "__main__":
         recon_noisy_last = np.squeeze(read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', f'recon_it{it[1]}.hdr'), reader='numpy'))
 
         ax[0].imshow(recon_denoised_last, cmap='gray')
-        ax[0].set_title(f'Denoised Reconstruction at iteration ({it[0]})\nPSNR: {PSNRs_denoised[-1]:.2f} dB, SSIM: {SSIMs_denoised[-1]:.4f}')
+        ax[0].set_title(f'Denoised Reconstruction at iteration ({it[0]})\nPSNR: {PSNRs_denoised[it[0]-1]:.2f} dB, SSIM: {SSIMs_denoised[it[0]-1]:.4f}')
         ax[0].axis('off')
 
         ax[1].imshow(recon_noisy_last, cmap='gray')
-        ax[1].set_title(f'Noisy Reconstruction at iteration ({it[1]})\nPSNR: {PSNRs_noisy[-1]:.2f} dB, SSIM: {SSIMs_noisy[-1]:.4f}')
+        ax[1].set_title(f'Noisy Reconstruction at iteration ({it[1]})\nPSNR: {PSNRs_noisy[it[1]-1]:.2f} dB, SSIM: {SSIMs_noisy[it[1]-1]:.4f}')
         ax[1].axis('off')
 
         plt.savefig(os.path.join(dest_path, f'recon_images_{it}_OSEM.png'))

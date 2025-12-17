@@ -6,8 +6,9 @@ import numpy as np
 import copy
 
 from pytorcher.trainer.pytorch_trainer import PytorchTrainer
+from pytorcher.utils.processing import normalize_batch
 from noise2noise.data.data_loader import SinogramGeneratorReconstructionTest
-from pet_recon.castor_reconstructor import CastorPetReconstruction
+from pet_recon import CastorPetReconstructor
 from tools.image.metrics import PSNR
 
 
@@ -56,7 +57,7 @@ class InferencePipeline(PytorchTrainer):
         self.data_loader_test = self.create_test_data_loader()
 
     def get_reconstructor(self):
-        self.reconstructor = CastorPetReconstruction(
+        self.reconstructor = CastorPetReconstructor(
             binrecon=self.binrecon,
             binsimu=self.binsimu,
             fout="recon",
@@ -77,7 +78,9 @@ class InferencePipeline(PytorchTrainer):
         """
         Create test data loader.
         """
-        self.dataset_test = SinogramGeneratorReconstructionTest(self.binsimu,
+        self.dataset_test = SinogramGeneratorReconstructionTest(
+                                         simulator_type='castor',
+                                         binsimu=self.binsimu,
                                          dest_path=os.path.join(self.dest_path),
                                          length=self.dataset_size,
                                          image_size=self.image_size,
@@ -111,7 +114,8 @@ class InferencePipeline(PytorchTrainer):
                 iterations = 16
                 subsets = 16
 
-                self.reconstructor.run(dest_path_recon, it=f"{iterations}:{subsets}", dim=(*self.image_size,1), voxel_size=self.voxel_size)
+                self.reconstructor.run(file_path=f"{dest_path_recon}/data/data.cdh",
+                dest_path=dest_path_recon, it=f"{iterations}:{subsets}", dim=(*self.image_size,1), voxel_size=self.voxel_size)
 
                 # read reconstructed image
                 PSNRs = []
@@ -123,7 +127,7 @@ class InferencePipeline(PytorchTrainer):
                         recon_image = torch.frombuffer(f.read(), dtype=torch.float32)
                         recon_image = recon_image.reshape(self.image_size)
                         # Compute PSNR between reconstructed image and image ground truth
-                        PSNRs.append(PSNR(object_ground_truth.select(0, i).numpy(), recon_image))
+                        PSNRs.append(PSNR(object_ground_truth.select(0, i).numpy(), recon_image.numpy()))
                         # update result
                         if out is None or PSNRs[-1] > max_PSNR:
                             out = recon_image
@@ -176,15 +180,15 @@ if __name__ == "__main__":
 
 
     inference_pipeline = InferencePipeline(
-        model_name="Noise2Noise_2DPET_Model",
-        model_version=10,
+        model_name="Noise2Noise_2DPET_Model_val_psnr",
+        model_version=1,
         metrics_configs=[
             ['PSNR', {}],
             ['SSIM', {}]
         ],
         image_size=(256,256),
         voxel_size=(2,2,2),
-        dataset_size=1,
+        dataset_size=128,
         batch_size=1,
         dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise/test",
         seed=42,
