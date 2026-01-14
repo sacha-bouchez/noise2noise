@@ -24,7 +24,8 @@ class SinogramGenerator(Dataset):
         self.image_size = image_size
         self.voxel_size = voxel_size
         #
-        self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size)
+        volume_activity = 1e3  # in kBq/ml, this is a reasonable pre-computed value for toy simulator
+        self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size, volume_activity=volume_activity)
         #
         if seed is None:
             self.seed = random.randint(0, 1e32)
@@ -33,7 +34,7 @@ class SinogramGenerator(Dataset):
         # Simulation parameters
         self.nb_counts = 3e6
         self.half_life = 109.8 * 60  # in seconds, F-18
-        self.acquisition_time = None
+        self.acquisition_time = 600  # in seconds, 600 seconds is a pre-computed reasonable value for toy simulator with 3e6 counts
         self.scatter_component = 0.35
         self.random_component = 0.40
         self.gaussian_PSF = 4  # in mm
