@@ -7,9 +7,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from noise2noise.data.data_loader import SinogramGenerator
+from noise2noise.model.unet_noise2noise import UNetNoise2Noise as UNet
 
 from pytorcher.trainer import PytorchTrainer
-from pytorcher.models import UNet
+
 from pytorcher.utils.processing import normalize_batch
 
 class Noise2NoiseTrainer(PytorchTrainer):
@@ -107,11 +108,14 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def get_objective(self):
         type = self.objective_type.lower()
-        assert type in ['mse', 'poisson'], "Objective type not recognized. Supported types: 'MSE', 'Poisson'."
-        if type == 'mse':
+        assert type in ['mse', 'poisson', 'mse_anscombe'], "Objective type not recognized. Supported types: 'MSE', 'Poisson', 'MSE_Anscombe'."
+        if 'mse' in type:
             objective = torch.nn.MSELoss()
         elif type == 'poisson':
             objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='mean')
+        #
+        self.model.loss_type = type # inform model about loss type for potential post-processing
+        #
         return objective
 
     def log_and_reset_metrics(self, epoch):
@@ -127,7 +131,33 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def fit(self):
 
-        monitored_metrics = [ 'val_psnr' ]
+        def anscombe(x):
+            return 2 * torch.sqrt( x + (3/8) )
+
+        def compute_loss(output, target):
+            #
+            if self.objective_type.lower() == 'poisson':
+                loss = self.objective(output, target)
+            elif self.objective_type.lower() == 'mse':
+                loss = self.objective(output / torch.sqrt(output + 1e-6), target / torch.sqrt(output + 1e-6)) # heteroscedastic MSE
+            elif self.objective_type.lower() == 'mse_anscombe':
+                if not self.model.training:
+                    output = anscombe(output) # At inference time, rescale back to Anscombe domain
+                target = anscombe(target)
+                loss = self.objective(output, target)
+            #
+            return loss
+
+        def inference_pair_loss_metrics(noisy_img_a, noisy_img_b, clean_img):
+            """ Perform inference with a as input and b as target, and compute loss """
+            output = self.model(noisy_img_a)
+            loss = compute_loss(output, noisy_img_b)
+            self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output))
+            # free up memory
+            del output
+            torch.cuda.empty_cache()
+            #
+            return loss
 
         for epoch in range(self.initial_epoch, self.n_epochs):
 
@@ -153,22 +183,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 noisy_img2 = noisy_img2.float()
                 clean_img = clean_img.float()
 
-                def inference_pair_and_loss(noisy_img_a, noisy_img_b):
-                    """ Perform inference with a as input and b as target, and compute loss """
-                    output = self.model(noisy_img_a)
-                    if self.objective_type.lower() == 'poisson':
-                        loss = self.objective(output, noisy_img_b)
-                    elif self.objective_type.lower() == 'mse':
-                        loss = self.objective(normalize_batch(output), normalize_batch(noisy_img_b))
-                    self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output))
-                    # free up memory
-                    del output
-                    torch.cuda.empty_cache()
-                    return loss
+                # Inference and loss computation for pair 1
+                loss_1 = inference_pair_loss_metrics(noisy_img1, noisy_img2, clean_img)
+                # Inference and loss computation for pair 2
+                loss_2 = inference_pair_loss_metrics(noisy_img2, noisy_img1, clean_img)
 
-                loss_1 = inference_pair_and_loss(noisy_img1, noisy_img2)
-                loss_2 = inference_pair_and_loss(noisy_img2, noisy_img1)
-
+                # global loss
                 loss = 1/2 * ( loss_1 + loss_2 ) # NOTE the .5 factor is used for learning rate scaling consistency with standard supervised training
                 # Backpropagation
                 self.optimizer.zero_grad()
@@ -200,15 +220,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         noisy_img = noisy_img.float()
                         clean_img = clean_img.float()
 
-                        outputs = self.model(noisy_img)
-                        if self.objective_type.lower() == 'poisson':
-                            val_loss = self.objective(outputs, noisy_img)
-                        elif self.objective_type.lower() == 'mse':
-                            val_loss = self.objective(normalize_batch(outputs), normalize_batch(clean_img))
-
-                        # Detach tensors and move to CPU before updating metrics to avoid
-                        # holding the computation graph or GPU memory across batches
-                        self.update_metrics(val_loss.detach().cpu(), normalize_batch(clean_img).detach().cpu(), normalize_batch(outputs).detach().cpu())
+                        output = self.model(noisy_img)
+                        val_loss = compute_loss(output, noisy_img)
+                        self.update_metrics(val_loss, normalize_batch(clean_img), normalize_batch(output))
                         
                         print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
 
@@ -219,8 +233,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     metric.reset_states()
 
                 # metric monitoring
+                monitored_metrics = [ m for m in list(m_dict.keys()) if m.startswith('val_loss') ]  # currently only loss monitoring is supported
                 for metric_name in monitored_metrics:
-                    self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name])
+                    self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name], mode='min')
 
                 # ensure we go back to training mode after validation
                 self.model.train()
