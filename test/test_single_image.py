@@ -73,7 +73,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
 
-    def set_acquisition_time(self, nb_counts=3e6, half_life=109.8*60, scatter_component=0.35, random_component=0.40):
+    def set_acquisition_time(self, nb_counts=3e6, half_life=109.8*60, scatter_component=0.35, random_component=0.40, gaussian_PSF=4):
         # Get volume activity from image
         img = read_castor_binary_file(self.img_path, reader='numpy').squeeze()
         att = read_castor_binary_file(self.img_att_path, reader='numpy').squeeze()
@@ -83,7 +83,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
             att,
             scatter_component=scatter_component,
             random_component=random_component,
-            gaussian_PSF=4
+            gaussian_PSF=gaussian_PSF
         )
         # Get total counts in the noise-free prompt sinogram
         counts = noise_free_prompt.sum()  # in counts
@@ -91,12 +91,12 @@ class SingleImageInferencePipeline(PytorchTrainer):
         self.acquisition_time = (nb_counts / counts) * half_life / np.log(2)
         return self.acquisition_time
 
-    def get_simulator(self, nb_counts=3e6):
+    def get_simulator(self, nb_counts=3e6, scatter_component=0.35, random_component=0.40, gaussian_PSF=4):
         if self.simulator_type == 'castor':
             self.sinogram_simulator = SinogramSimulatorCastor(binsimu=self.binsimu, save_castor=True, seed=self.seed)
         elif self.simulator_type == 'toy':
             self.sinogram_simulator = SinogramSimulator(seed=self.seed)
-            self.acquisition_time = self.set_acquisition_time(nb_counts=nb_counts)
+            self.acquisition_time = self.set_acquisition_time(nb_counts=nb_counts, scatter_component=scatter_component, random_component=random_component, gaussian_PSF=gaussian_PSF)
         return self.sinogram_simulator
 
     def get_reconstructor(self):
