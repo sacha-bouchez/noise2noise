@@ -2,6 +2,7 @@ import os
 import random
 import shutil
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -33,10 +34,6 @@ class SinogramGenerator(Dataset):
         if not os.path.exists(self.dest_path):
             os.makedirs(self.dest_path)
         self.length = length
-        self.image_size = image_size
-        self.voxel_size = voxel_size
-        #
-        self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size, volume_activity=volume_activity)
         #
         if seed is None:
             self.seed = random.randint(0, 1e32)
@@ -51,6 +48,10 @@ class SinogramGenerator(Dataset):
         self.gaussian_PSF = gaussian_PSF
         self.random_deficiencies = random_deficiencies
         #
+        self.hashcode = self.get_generator_hashcode()
+        #
+        self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size, volume_activity=volume_activity)
+        #
         self.sinogram_simulator = SinogramSimulator(
             n_angles=n_angles,
             nb_radius_px=nb_radius_px,
@@ -61,21 +62,67 @@ class SinogramGenerator(Dataset):
             gaussian_PSF=gaussian_PSF,
             seed=seed
         )
+
+        #
         if self.acquisition_time is None:
-            self.acquisition_time = self.sinogram_simulator.set_acquisition_time(n_samples=100, nb_counts=self.nb_counts, half_life=self.half_life, volume_activity=self.phantom_generator.volume_activity)
-        #
-        self.hashcode = self.get_generator_hashcode()
-        #
+            self.acquisition_time = self.set_acquisition_time(n_samples=100, nb_counts=self.nb_counts, half_life=self.half_life)
 
     def __len__(self):
         return self.length
 
     def get_generator_hashcode(self):
-        return hash((
-                     tuple(self.image_size),
-                     tuple(self.voxel_size),
-                     self.seed)) & 0xffffffff
+        return hash(tuple(self.__dict__)) & 0xffffffff
 
+    def set_acquisition_time(self, n_samples=100, nb_counts=3e6, half_life=109.8*60):
+        """
+        Compute the projection for several samples and set the acquisition time accordingly to the target average number of counts.
+        param n_samples: number of samples to simulate.
+        param half_life: half life of the isotope in seconds. Default is 109.8*60 for F-18.
+        """
+        print(f"Setting acquisition time over {n_samples} samples to reach {nb_counts} counts on average...")
+        counts_list = []
+        for idx in range(min(n_samples, self.length)):
+            # Set phantom generator seed to match sample index
+            self.phantom_generator.set_seed(self.seed + idx)
+            #
+            obj_path, att_path = self.generate_phantom(idx)
+            #
+            obj = read_castor_binary_file(obj_path).squeeze()
+            att = read_castor_binary_file(att_path).squeeze()
+            # Simulate true counts
+            _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(obj, att)
+            # Get total counts in the noise-free prompt sinogram
+            counts = noise_free_prompt.sum()  # in counts
+            #
+            counts_list.append(counts)
+
+        # get best estimate of counts using histogram average
+        hist = np.histogram(counts_list, bins=30)
+        max_bin_idx = np.argmax(hist[0])
+        bin_edges = hist[1]
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        avg_counts = bin_centers[max_bin_idx]
+        #
+        acquisition_time = (nb_counts / avg_counts) * half_life / np.log(2)
+        print(f"Estimated acquisition time: {acquisition_time:.2f} seconds to reach {nb_counts} counts on average.")
+        # cleanup
+        return acquisition_time
+    
+    def generate_phantom(self, idx):
+        # Set Seed
+        self.phantom_generator.set_seed(self.seed + idx)
+        # Create unique hashcode for data sample with idx and dataset generator hashcode
+        data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
+        #
+        dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
+        if not os.path.exists(f'{dest_path}/object/object.img'):
+            # Generate phantom
+            obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
+        else:
+            obj_path = f'{dest_path}/object/object'
+            att_path = f'{dest_path}/object/object_att'
+        #
+        return obj_path, att_path
 
     def simulate_sinogram(self, idx):
 
@@ -83,22 +130,15 @@ class SinogramGenerator(Dataset):
         torch.manual_seed(self.seed + idx)
         torch.cuda.manual_seed_all(self.seed + idx)
         self.phantom_generator.set_seed(self.seed + idx)
-
         # Create unique hashcode for data sample with idx and dataset generator hashcode
         data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
-
         #
         dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
         if not os.path.exists(f'{dest_path}/simu/simu_nfpt.s.hdr'):
-
             # Generate phantom
-            obj_path, att_path = self.phantom_generator.run(os.path.join(self.dest_path, f'data_{data_hashcode}', f'object'))
+            obj_path, att_path = self.generate_phantom(idx)
             # Simulate sinogram
-            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path,
-                                        nb_counts=self.nb_counts,
-                                        half_life=self.half_life,
-                                        acquisition_time=self.acquisition_time
-                                        )
+            self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path, acquisition_time=self.acquisition_time)
         #
         data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr').squeeze()
         data_nfpt = torch.from_numpy(data_nfpt)
@@ -159,8 +199,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
 
-    binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
-    dest_path = os.path.join(os.getenv("WORKSPACE"), "data")
+    dest_path = os.path.join(os.getenv("WORKSPACE"), "data", "test")
     dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
