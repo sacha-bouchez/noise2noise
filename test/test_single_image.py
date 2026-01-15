@@ -101,9 +101,9 @@ class SingleImageInferencePipeline(PytorchTrainer):
         sinogram_data = np.fromfile(os.path.join(dest_path, 'simu', 'simu_pt.s'), dtype='<i2')
         self.is_simulated = True
 
-    def compute_denoiser_bias_and_variance(self, n_samples=100):
+    def compute_denoiser_bias_and_standard_deviation(self, n_samples=100):
         """Here the estimator is the denoiser only, not the full reconstruction pipeline."""
-        print(f"Computing denoiser bias and variance with {n_samples} samples ...")
+        print(f"Computing denoiser bias and standard_deviation with {n_samples} samples ...")
         # self.set_seed(seed=self.seed)
         #
         if not self.is_simulated:
@@ -127,6 +127,10 @@ class SingleImageInferencePipeline(PytorchTrainer):
                 expectation += sinogram_prompt_denoised
                 expectation_square += sinogram_prompt_denoised ** 2
         #
+        expectation = expectation.cpu().numpy()
+        expectation_square = expectation_square.cpu().numpy()
+        sinogram_noise_free = sinogram_noise_free.cpu().numpy()
+        #
         expectation /= n_samples
         expectation_square /= n_samples
         expectation = expectation.squeeze()
@@ -135,12 +139,13 @@ class SingleImageInferencePipeline(PytorchTrainer):
 
         bias = expectation - sinogram_noise_free
         variance = expectation_square - expectation ** 2
+        standard_deviation = np.sqrt(variance)
         #
-        return  sinogram_noise_free.cpu().numpy(), bias.cpu().numpy(), variance.cpu().numpy()
+        return  sinogram_noise_free, bias, standard_deviation
 
-    def compute_reconstructor_bias_and_variance(self, n_samples=10, denoise=True, phantom_threshold=1e-3):
+    def compute_reconstructor_bias_and_standard_deviation(self, n_samples=10, denoise=True, phantom_threshold=1e-3):
         """Here the estimator is the full reconstruction pipeline."""
-        print(f"Computing reconstructor bias and variance with {n_samples} samples ...")
+        print(f"Computing reconstructor bias and standard_deviation with {n_samples} samples ...")
         self.set_seed(seed=self.seed)
         #
         if not self.is_simulated:
@@ -188,8 +193,9 @@ class SingleImageInferencePipeline(PytorchTrainer):
         #
         bias = np.where(reference_mask, 100 * (expectation - reference) / reference, np.nan)
         variance = np.where(reference_mask, 100 * (expectation_square - expectation ** 2) / reference ** 2, np.nan)
+        standard_deviation = np.sqrt(variance)
         #
-        return reference, bias, variance
+        return reference, bias, standard_deviation
 
     def overwrite_prompt_sinogram(self, sinogram):
         """
@@ -275,7 +281,7 @@ if __name__ == "__main__":
         model_name="Noise2Noise_2DPET_Model_val_psnr",
         model_version=4,
         dest_path=dest_path,
-        nb_counts=2.5e5,
+        nb_counts=1e6,
         simulator_args={
             'n_angles':300,
             'scanner_radius':300,
@@ -295,7 +301,7 @@ if __name__ == "__main__":
         img_att_path=f"{os.getenv('WORKSPACE')}/data/brain_web_phantom/object/attenuat_brain_phantom.hdr"
     )
 
-    inference_pipeline.run(nb_counts=3e6)
+    inference_pipeline.run()
 
     # plot PSNR against iterations for noisy and denoised reconstruction
     import matplotlib.pyplot as plt
@@ -303,17 +309,31 @@ if __name__ == "__main__":
     # Read ground truth image
     gt_image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
 
-    recon_denoised = read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', 'recon_image.hdr'), reader='numpy')    
-    recon_noisy = read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', 'recon_image.hdr'), reader='numpy')
+    recon_denoised = read_castor_binary_file(os.path.join(dest_path, 'recon_denoised', 'recon_image.hdr'), reader='numpy').squeeze()
+    recon_noisy = read_castor_binary_file(os.path.join(dest_path, 'recon_noisy', 'recon_image.hdr'), reader='numpy').squeeze()
 
-    PSNR_denoised = PSNR(I=gt_image, K=recon_denoised)
-    PSNR_noisy = PSNR(I=gt_image, K=recon_noisy)
+    PSNR_denoised = PSNR(I=gt_image, K=recon_denoised, mask=gt_image>0)
+    PSNR_noisy = PSNR(I=gt_image, K=recon_noisy, mask=gt_image>0)
 
-    SSIM_denoised = SSIM(img1=gt_image, img2=recon_denoised)
-    SSIM_noisy = SSIM(img1=gt_image, img2=recon_noisy)
+    SSIM_denoised = SSIM(img1=gt_image, img2=recon_denoised, mask=gt_image>0)
+    SSIM_noisy = SSIM(img1=gt_image, img2=recon_noisy, mask=gt_image>0)
 
     print(f"Denoised Reconstruction - PSNR: {PSNR_denoised:.2f} dB, SSIM: {SSIM_denoised:.4f}")
     print(f"Noisy Reconstruction - PSNR: {PSNR_noisy:.2f} dB, SSIM: {SSIM_noisy:.4f}")
+
+    # fig, ax = plt.subplots(1,2, figsize=(10,5))
+    # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
+    # ax[0].imshow(recon_denoised, cmap='gray_r')
+    # ax[0].set_title(f'Denoised Reconstruction\nPSNR: {PSNR_denoised:.2f} dB, SSIM: {SSIM_denoised:.4f}')
+    # ax[0].axis('off')
+
+    # ax[1].imshow(recon_noisy, cmap='gray_r')
+    # ax[1].set_title(f'Noisy Reconstruction\nPSNR: {PSNR_noisy:.2f} dB, SSIM: {SSIM_noisy:.4f}')
+    # ax[1].axis('off')
+
+    # # plt.show()
+
+    # plt.savefig(os.path.join(dest_path, f'recon_images_final_{int(inference_pipeline.nb_counts)}.png'))
 
     #
     n_samples = 100
@@ -321,22 +341,23 @@ if __name__ == "__main__":
 
     # init figure
     fig, ax = plt.subplots(3,3, figsize=(15,15))
-    fig.suptitle(f'Denoiser and Reconstructor Bias and Variance Analysis over {n_samples} Samples and {phantom_threshold} kBq/mL Threshold', fontsize=16)
+    fig.suptitle(f'Denoiser and Reconstructor Bias and standard deviation Analysis over {n_samples} Samples and {phantom_threshold} kBq/mL Threshold', fontsize=16)
     plt.setp(ax, xticks=[], yticks=[])
-    # Sinogram denoiser bias and variance
-    reference_sino, bias, variance = inference_pipeline.compute_denoiser_bias_and_variance(n_samples=n_samples)
+    
+    # Sinogram denoiser bias and standard_deviation
+    reference_sino, bias, standard_deviation = inference_pipeline.compute_denoiser_bias_and_standard_deviation(n_samples=n_samples)
     ax[0,0].imshow(reference_sino, cmap='gray')
     ax[0,0].set_title('Reference Noise-free Sinogram')
     fig.colorbar(ax[0,0].images[0], ax=ax[0,0])
     ax[0,1].imshow(bias, cmap='magma')
     ax[0,1].set_title('Denoiser Bias (%)')
     fig.colorbar(ax[0,1].images[0], ax=ax[0,1])
-    ax[0,2].imshow(np.log(variance), cmap='magma')
-    ax[0,2].set_title('Denoiser log-Variance (log %)')
+    ax[0,2].imshow(standard_deviation, cmap='magma')
+    ax[0,2].set_title('Denoiser standard_deviation (%)')
     fig.colorbar(ax[0,2].images[0], ax=ax[0,2])
 
-    # Denoised Reconstructor bias and variance
-    reference_recon, bias_recon, variance_recon = inference_pipeline.compute_reconstructor_bias_and_variance(n_samples=n_samples, denoise=True, phantom_threshold=phantom_threshold)
+    # Denoised Reconstructor bias and standard_deviation
+    reference_recon, bias_recon, standard_deviation_recon = inference_pipeline.compute_reconstructor_bias_and_standard_deviation(n_samples=n_samples, denoise=True, phantom_threshold=phantom_threshold)
     ax[1,0].imshow(reference_recon, cmap='gray_r')
     ax[1,0].set_title('Activity Concentration (kBq/mL)')
     ax[1, 0].annotate(f'Max: {np.max(reference_recon):.2f} kBq/mL\nMin: {np.min(reference_recon):.2f} kBq/mL', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
@@ -347,14 +368,14 @@ if __name__ == "__main__":
     scala_bias = (1 / roi_size) * np.sqrt(np.nansum(bias_recon ** 2))
     ax[1, 1].annotate(f'Scalar Relative Bias: {scala_bias:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[1,1].images[0], ax=ax[1,1])
-    ax[1,2].imshow(variance_recon, cmap='magma')
-    ax[1,2].set_title('Denoised Reconstructor Variance (%)')
-    scalar_variance = np.nanmean(variance_recon)
-    ax[1, 2].annotate(f'Scalar Relative Variance: {scalar_variance:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    ax[1,2].imshow(standard_deviation_recon, cmap='magma')
+    ax[1,2].set_title('Denoised Reconstructor standard_deviation (%)')
+    scalar_standard_deviation = np.nanmean(standard_deviation_recon)
+    ax[1, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[1,2].images[0], ax=ax[1,2])
 
-    # Noisy Reconstructor bias and variance
-    reference_recon_noisy, bias_recon_noisy, variance_recon_noisy = inference_pipeline.compute_reconstructor_bias_and_variance(n_samples=n_samples, denoise=False, phantom_threshold=phantom_threshold)
+    # Noisy Reconstructor bias and standard_deviation
+    reference_recon_noisy, bias_recon_noisy, standard_deviation_recon_noisy = inference_pipeline.compute_reconstructor_bias_and_standard_deviation(n_samples=n_samples, denoise=False, phantom_threshold=phantom_threshold)
     # remove ax[2,0] axis
     ax[2,0].axis('off')
     # fig.colorbar(ax[2,0].images[0], ax=ax[2,0])
@@ -364,14 +385,14 @@ if __name__ == "__main__":
     scala_bias_noisy = (1 / roi_size_noisy) * np.sqrt(np.nansum(bias_recon_noisy ** 2))
     ax[2, 1].annotate(f'Scalar Relative Bias: {scala_bias_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[2,1].images[0], ax=ax[2,1])
-    ax[2,2].imshow(variance_recon_noisy, cmap='magma')
-    ax[2,2].set_title('Noisy Reconstructor Variance (%)')
-    scalar_variance_noisy = np.nanmean(variance_recon_noisy)
-    ax[2, 2].annotate(f'Scalar Relative Variance: {scalar_variance_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    ax[2,2].imshow(standard_deviation_recon_noisy, cmap='magma')
+    ax[2,2].set_title('Noisy Reconstructor standard_deviation (%)')
+    scalar_standard_deviation_noisy = np.nanmean(standard_deviation_recon_noisy)
+    ax[2, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[2,2].images[0], ax=ax[2,2])
 
     plt.tight_layout()
-    plt.savefig(os.path.join(dest_path, 'denoiser_and_reconstructor_bias_variance.jpg'), dpi=150)
+    plt.savefig(os.path.join(dest_path, 'denoiser_and_reconstructor_bias_standard_deviation.jpg'), dpi=150)
 
     # PSNRs_denoised = []
     # SSIMs_denoised = []
