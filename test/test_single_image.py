@@ -12,38 +12,27 @@ import copy
 
 class SingleImageInferencePipeline(PytorchTrainer):
 
-    def __init__(self, model_name, model_version, simulator_type='toy',
-                image_size=(256,256), voxel_size=(2,2,2), num_workers=4,
-                dest_path='./', seed=42, binsimu=None, binrecon=None, metrics_configs=[]):
-
-        self.simulator_type = simulator_type
-        self.image_size = image_size
-        self.voxel_size = voxel_size
-        self.num_workers = num_workers
+    def __init__(
+            self,
+            model_name,
+            model_version,
+            dest_path='./',
+            nb_counts=3e6,
+            simulator_args={},
+            reconstructor_args={},
+            seed=42):
+        #
         self.dest_path = dest_path
+        self.nb_counts = nb_counts
         self.set_seed(seed)
-        self.binrecon = binrecon if binrecon is not None else f"{os.getenv('WORKSPACE')}/castor_v3.2_bin/castor-recon_unix64"
-        self.binsimu = binsimu if binsimu is not None else f"{os.getenv('WORKSPACE')}/simulator/bin"
-
+        #
         self.device = self.get_device()
         self.model = self.get_model(model_name, model_version, device=self.device)
-
-        # add prefix for noisy reconstruction and denoised reconstruction metrics
-        metrics_configs_ = []
-        for metric_config in metrics_configs:
-            metric_name = metric_config[0]
-            metric_params = copy.deepcopy(metric_config[1])
-            metric_params.update({'name': f'denoised_recon_{metric_name}'})
-            metrics_configs_.append([metric_name, metric_params])
-            metric_params = copy.deepcopy(metric_config[1])
-            metric_params.update({'name': f'noisy_recon_{metric_name}'})
-            metrics_configs_.append([metric_name, metric_params])
-
-        self.metrics = self.get_metrics(metrics_configs_)
-        # remove loss
-        self.metrics = [m for m in self.metrics if m.name != 'loss']
         #
         self.is_simulated = False
+        # Get simulator and reconstructor
+        self.sinogram_simulator = self.get_simulator(**simulator_args)
+        self.reconstructor = self.get_reconstructor(**reconstructor_args)
 
     def get_model(self, model_name, model_version, device):
         """
@@ -59,9 +48,15 @@ class SingleImageInferencePipeline(PytorchTrainer):
         """
         Set the image path for inference.
         """
-
         self.img_path = img_path # in kBq/mL
         self.img_att_path = img_att_path # in cm^-1
+        #
+        self.img = read_castor_binary_file(self.img_path, reader='numpy').squeeze()
+        self.img_att = read_castor_binary_file(self.img_att_path, reader='numpy').squeeze()
+        self.image_size = self.img.shape
+        #
+        # Get appropriate acquisition time to reach desired counts on the image
+        self.acquisition_time = self.set_acquisition_time(self.nb_counts)
 
     def set_seed(self, seed):
         """
@@ -73,42 +68,22 @@ class SingleImageInferencePipeline(PytorchTrainer):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
 
-    def set_acquisition_time(self, nb_counts=3e6, half_life=109.8*60, scatter_component=0.35, random_component=0.40, gaussian_PSF=4):
-        # Get volume activity from image
-        img = read_castor_binary_file(self.img_path, reader='numpy').squeeze()
-        att = read_castor_binary_file(self.img_att_path, reader='numpy').squeeze()
+    def set_acquisition_time(self, nb_counts=3e6):
         # Simulate true counts
-        _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(
-            img,
-            att,
-            scatter_component=scatter_component,
-            random_component=random_component,
-            gaussian_PSF=gaussian_PSF
-        )
+        _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(self.img, self.img_att)
         # Get total counts in the noise-free prompt sinogram
         counts = noise_free_prompt.sum()  # in counts
         # Compute acquisition time to reach desired counts (nb_counts)
+        half_life = self.sinogram_simulator.half_life
         self.acquisition_time = (nb_counts / counts) * half_life / np.log(2)
         return self.acquisition_time
 
-    def get_simulator(self, nb_counts=3e6, scatter_component=0.35, random_component=0.40, gaussian_PSF=4):
-        if self.simulator_type == 'castor':
-            self.sinogram_simulator = SinogramSimulatorCastor(binsimu=self.binsimu, save_castor=True, seed=self.seed)
-        elif self.simulator_type == 'toy':
-            self.sinogram_simulator = SinogramSimulator(seed=self.seed)
-            self.acquisition_time = self.set_acquisition_time(nb_counts=nb_counts, scatter_component=scatter_component, random_component=random_component, gaussian_PSF=gaussian_PSF)
+    def get_simulator(self, **simulator_args):
+        self.sinogram_simulator = SinogramSimulator(seed=self.seed, **simulator_args)
         return self.sinogram_simulator
 
-    def get_reconstructor(self):
-        if self.simulator_type == 'castor':
-            self.reconstructor = CastorPetReconstructor(
-                binrecon=self.binrecon,
-                binsimu=self.binsimu,
-                fout="recon",
-                verbose=1
-            )
-        elif self.simulator_type == 'toy':
-            self.reconstructor = PetReconstructor()
+    def get_reconstructor(self, **reconstructor_args):
+        self.reconstructor = PetReconstructor(**reconstructor_args)
         return self.reconstructor
 
     def run_simulation(self):
@@ -120,8 +95,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
             img_path=self.img_path,
             img_att_path=self.img_att_path,
             dest_path=dest_path,
-            acquisition_time=self.acquisition_time,
-            gaussian_PSF=4,
+            acquisition_time=self.acquisition_time
         )
         # get noisy range from simulated data
         sinogram_data = np.fromfile(os.path.join(dest_path, 'simu', 'simu_pt.s'), dtype='<i2')
@@ -240,34 +214,19 @@ class SingleImageInferencePipeline(PytorchTrainer):
                 file_path = os.path.join(dest_path, file)
                 if os.path.isfile(file_path):
                     os.remove(file_path)
-        # 
-        iterations = 10
-        subsets = 16
-        if self.simulator_type == 'castor':
-            self.reconstructor.run(
-                file_path=os.path.join(self.dest_path, 'simu', 'data', 'data.cdh'),
-                dest_path=dest_path,
-                it=f"{iterations}:{subsets}",
-                dim=(*self.image_size,1),
-                voxel_size=self.voxel_size
-            )
-        elif self.simulator_type == 'toy':
-            self.reconstructor.run(
-                file_path=os.path.join(self.dest_path, 'simu', 'simu_pt.s.hdr'),
-                dest_path=dest_path,
-                method='fbp',
-                dim=(*self.image_size,1),
-                method_kwargs={'filter_name': 'ramp', 'interpolation': 'linear'}
-            )
+        # run reconstruction
+        self.reconstructor.run(
+            file_path=os.path.join(self.dest_path, 'simu', 'simu_pt.s.hdr'),
+            dest_path=dest_path,
+            method='fbp',
+            dim=(*self.image_size,1),
+            method_kwargs={'filter_name': 'ramp', 'interpolation': 'linear'}
+        )
 
-    def run(self, nb_counts=3e6):
+    def run(self):
         """
         Run the full inference pipeline for the single image.
         """
-
-        # Get simulator and reconstructor
-        self.get_simulator(nb_counts=nb_counts)
-        self.get_reconstructor()
 
         # Run simulation
         self.run_simulation()
@@ -315,16 +274,20 @@ if __name__ == "__main__":
     inference_pipeline = SingleImageInferencePipeline(
         model_name="Noise2Noise_2DPET_Model_val_psnr",
         model_version=4,
-        metrics_configs=[
-            ['PSNR', {}],
-            ['SSIM', {}]
-        ],
-        image_size=(160,160),
-        voxel_size=(2,2,2),
         dest_path=dest_path,
-        seed=42,
-        binsimu=f"{os.getenv('WORKSPACE')}/simulator/bin",
-        num_workers=10
+        nb_counts=2.5e5,
+        simulator_args={
+            'n_angles':300,
+            'scanner_radius':300,
+            'voxel_size_mm':(2.0, 2.0),
+            'scatter_component':0.36,
+            'random_component':0.50,
+            'random_deficiencies':10,
+            'gaussian_PSF':4.0,
+            'half_life':109.8*60,
+        },
+        reconstructor_args={},
+        seed=42
     )
 
     inference_pipeline.set_image(
