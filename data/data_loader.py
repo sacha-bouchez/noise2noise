@@ -73,7 +73,7 @@ class SinogramGenerator(Dataset):
     def get_generator_hashcode(self):
         return hash(tuple(self.__dict__)) & 0xffffffff
 
-    def set_acquisition_time(self, n_samples=100, nb_counts=3e6, half_life=109.8*60):
+    def set_acquisition_time(self, n_samples=100, nb_counts=3e6):
         """
         Compute the projection for several samples and set the acquisition time accordingly to the target average number of counts.
         param n_samples: number of samples to simulate.
@@ -103,6 +103,7 @@ class SinogramGenerator(Dataset):
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         avg_counts = bin_centers[max_bin_idx]
         #
+        half_life = self.sinogram_simulator.half_life
         acquisition_time = (nb_counts / avg_counts) * half_life / np.log(2)
         print(f"Estimated acquisition time: {acquisition_time:.2f} seconds to reach {nb_counts} counts on average.")
         # cleanup
