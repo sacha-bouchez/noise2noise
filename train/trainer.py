@@ -40,6 +40,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         else:
             self.binsimu = binsimu
         self.dest_path = dest_path
+        self.model_name = 'Noise2Noise_2DPET_SinogramDenoiser'
         self.dataset_train_size = dataset_train_size
         self.dataset_val_size = dataset_val_size
         self.val_freq = val_freq
@@ -235,7 +236,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # metric monitoring
                 monitored_metrics = [ m for m in list(m_dict.keys()) if m.startswith('val_loss') ]  # currently only loss monitoring is supported
                 for metric_name in monitored_metrics:
-                    self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name], mode='min')
+                    if 'loss' in metric_name:
+                        mode = 'min'
+                    else:
+                        mode = 'max'
+                    self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name], mode=mode)
 
                 # ensure we go back to training mode after validation
                 self.model.train()
@@ -249,4 +254,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
         # log final best models
         for metric_name in monitored_metrics:
-            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"Noise2Noise_2DPET_Model_{metric_name}")
+            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"{self.model_name}_{metric_name}")
+
+        # log final model
+        mlflow.pytorch.log_model(self.model, artifact_path="final_model", registered_model_name=self.model_name)
