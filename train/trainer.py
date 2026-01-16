@@ -140,7 +140,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
             if self.objective_type.lower() == 'poisson':
                 loss = self.objective(output, target)
             elif self.objective_type.lower() == 'mse':
-                loss = self.objective(output / torch.sqrt(output + 1e-6), target / torch.sqrt(output + 1e-6)) # heteroscedastic MSE
+                eps = 1.0 # to avoid division by zero, tuned according to Poisson range
+                loss = self.objective(output / torch.sqrt(target + eps), target / torch.sqrt(target + eps)) # heteroscedastic MSE
             elif self.objective_type.lower() == 'mse_anscombe':
                 if not self.model.training:
                     output = anscombe(output) # At inference time, rescale back to Anscombe domain
