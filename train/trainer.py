@@ -28,6 +28,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        shuffle=False,
                        image_size=(256,256),
                        voxel_size=(2,2,2),
+                       nb_counts=1e6,
                        learning_rate=1e-3,
                        conv_layer_type='standard',
                        num_workers=10,
@@ -50,6 +51,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.shuffle = shuffle
         self.image_size = image_size
         self.voxel_size = voxel_size
+        self.nb_counts = nb_counts
         self.learning_rate = learning_rate
         self.objective_type = objective_type
         self.seed = seed
@@ -76,7 +78,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                                          length=self.dataset_train_size,
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
-                                         seed=self.seed)
+                                         nb_counts=self.nb_counts,
+                                         seed=self.seed
+        )
         loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
 
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
@@ -87,7 +91,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                                          length=self.dataset_val_size,
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
-                                         seed=self.dataset_val_seed)
+                                         nb_counts=self.nb_counts,
+                                         seed=self.dataset_val_seed
+        )
         loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
         return loader_train, loader_val

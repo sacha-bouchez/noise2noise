@@ -22,6 +22,7 @@ if __name__ == "__main__":
         shuffle=True,
         image_size=[256, 256],
         voxel_size=[2, 2, 2],
+        nb_counts=1e6,
         learning_rate=1e-4,
         L2_weight=0.0,
         objective_type='poisson',
