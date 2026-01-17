@@ -17,7 +17,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def __init__(self, 
                        simulator_type='castor',
-                       binsimu=None,
                        dest_path='./',
                        dataset_train_size=10000,
                        dataset_val_size=500,
@@ -28,18 +27,18 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        shuffle=False,
                        image_size=(256,256),
                        voxel_size=(2,2,2),
+                       n_angles=300,
+                       scanner_radius=300,
                        nb_counts=1e6,
                        learning_rate=1e-3,
                        conv_layer_type='standard',
+                       n_levels=3,
+                       global_conv=16,
                        num_workers=10,
                        L2_weight=1e-4,
                        objective_type='MSE',
                        seed=42):
         self.simulator_type = simulator_type
-        if binsimu is None:
-            self.binsimu = os.path.join(os.getenv("WORKSPACE"), "simulator", "bin")
-        else:
-            self.binsimu = binsimu
         self.dest_path = dest_path
         self.model_name = 'Noise2Noise_2DPET_SinogramDenoiser'
         self.dataset_train_size = dataset_train_size
@@ -51,12 +50,16 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.shuffle = shuffle
         self.image_size = image_size
         self.voxel_size = voxel_size
+        self.n_angles = n_angles
+        self.scanner_radius = scanner_radius
         self.nb_counts = nb_counts
         self.learning_rate = learning_rate
         self.objective_type = objective_type
         self.seed = seed
 
         self.conv_layer_type = conv_layer_type
+        self.n_levels = n_levels
+        self.global_conv = global_conv
 
         self.num_workers = num_workers
         self.L2_weight = L2_weight
@@ -72,12 +75,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
     def create_data_loader(self):
 
         self.dataset_train = SinogramGenerator(
-                                         self.simulator_type,
-                                         self.binsimu,
                                          dest_path=os.path.join(self.dest_path, 'train'),
                                          length=self.dataset_train_size,
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
+                                         n_angles=self.n_angles,
+                                         acquisition_time=253.3, # temporary value, will be overridden
+                                         scanner_radius=self.scanner_radius,
                                          nb_counts=self.nb_counts,
                                          seed=self.seed
         )
@@ -85,12 +89,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
         self.dataset_val = SinogramGenerator(
-                                         self.simulator_type,
-                                         self.binsimu,
                                          dest_path=os.path.join(self.dest_path, 'val'),
                                          length=self.dataset_val_size,
                                          image_size=self.image_size,
                                          voxel_size=self.voxel_size,
+                                         n_angles=self.n_angles,
+                                         scanner_radius=self.scanner_radius,
+                                         acquisition_time=self.dataset_train.acquisition_time,
                                          nb_counts=self.nb_counts,
                                          seed=self.dataset_val_seed
         )
@@ -109,7 +114,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
-        model = UNet(n_channels=1, n_classes=1, bilinear=True, layer_type=self.conv_layer_type, normalize_input=True)
+        model = UNet(
+            n_channels=1,
+            n_classes=1,
+            global_conv=self.global_conv,
+            n_levels=self.n_levels,
+            bilinear=True,
+            layer_type=self.conv_layer_type,
+            normalize_input=True
+        )
         model = model.to(self.device)
         return model
 

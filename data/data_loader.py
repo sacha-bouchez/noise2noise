@@ -19,16 +19,15 @@ class SinogramGenerator(Dataset):
             length=10,
             image_size=(256,256),
             voxel_size=(2,2,2),
-            n_angles=344,
-            nb_radius_px=252,
+            n_angles=300,
+            scanner_radius=300,
             volume_activity=1e3,  # in kBq/ml this is a reasonable pre-computed value for toy simulator
             nb_counts=3e6,
             half_life=109.8*60,
             acquisition_time=None,
-            scatter_component=0.35,
-            random_component=0.40,
+            scatter_component=0.36,
+            random_component=0.50,
             gaussian_PSF=4, # in mm
-            random_deficiencies=10,
             seed=None):
         self.dest_path = dest_path
         if not os.path.exists(self.dest_path):
@@ -46,7 +45,6 @@ class SinogramGenerator(Dataset):
         self.scatter_component = scatter_component
         self.random_component = random_component
         self.gaussian_PSF = gaussian_PSF
-        self.random_deficiencies = random_deficiencies
         #
         self.hashcode = self.get_generator_hashcode()
         #
@@ -54,32 +52,32 @@ class SinogramGenerator(Dataset):
         #
         self.sinogram_simulator = SinogramSimulator(
             n_angles=n_angles,
-            nb_radius_px=nb_radius_px,
+            scanner_radius=scanner_radius,
             voxel_size_mm=voxel_size[:2],
             scatter_component=scatter_component,
             random_component=random_component,
-            random_deficiencies=random_deficiencies,
             gaussian_PSF=gaussian_PSF,
             seed=seed
         )
 
         #
         if self.acquisition_time is None:
-            self.acquisition_time = self.set_acquisition_time(n_samples=100, nb_counts=self.nb_counts, half_life=self.half_life)
+            self.acquisition_time = self.set_acquisition_time(n_samples=100)
 
     def __len__(self):
         return self.length
 
     def get_generator_hashcode(self):
-        return hash(tuple(self.__dict__)) & 0xffffffff
+        serialized = json.dumps(self.__dict__, sort_keys=True, separators=(",", ":"))
+        return hashlib.md5(serialized.encode("utf-8")).hexdigest()[:8]
 
-    def set_acquisition_time(self, n_samples=100, nb_counts=3e6):
+    def set_acquisition_time(self, n_samples=100):
         """
         Compute the projection for several samples and set the acquisition time accordingly to the target average number of counts.
         param n_samples: number of samples to simulate.
         param half_life: half life of the isotope in seconds. Default is 109.8*60 for F-18.
         """
-        print(f"Setting acquisition time over {n_samples} samples to reach {nb_counts} counts on average...")
+        print(f"Setting acquisition time over {n_samples} samples to reach {self.nb_counts} counts on average...")
         counts_list = []
         for idx in range(min(n_samples, self.length)):
             # Set phantom generator seed to match sample index
@@ -104,8 +102,8 @@ class SinogramGenerator(Dataset):
         avg_counts = bin_centers[max_bin_idx]
         #
         half_life = self.sinogram_simulator.half_life
-        acquisition_time = (nb_counts / avg_counts) * half_life / np.log(2)
-        print(f"Estimated acquisition time: {acquisition_time:.2f} seconds to reach {nb_counts} counts on average.")
+        acquisition_time = (self.nb_counts / avg_counts) * half_life / np.log(2)
+        print(f"Estimated acquisition time: {acquisition_time:.2f} seconds to reach {self.nb_counts} counts on average.")
         # cleanup
         return acquisition_time
     
