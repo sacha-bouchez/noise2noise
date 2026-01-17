@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+import json, hashlib
 
 import numpy as np
 import torch
@@ -111,7 +112,7 @@ class SinogramGenerator(Dataset):
         # Set Seed
         self.phantom_generator.set_seed(self.seed + idx)
         # Create unique hashcode for data sample with idx and dataset generator hashcode
-        data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
+        data_hashcode = str(idx) + '_' + self.hashcode
         #
         dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
         if not os.path.exists(f'{dest_path}/object/object.img'):
@@ -130,7 +131,7 @@ class SinogramGenerator(Dataset):
         torch.cuda.manual_seed_all(self.seed + idx)
         self.phantom_generator.set_seed(self.seed + idx)
         # Create unique hashcode for data sample with idx and dataset generator hashcode
-        data_hashcode = hash((idx, self.hashcode)) & 0xffffffff
+        data_hashcode = str(idx) + '_' + self.hashcode
         #
         dest_path = os.path.join(self.dest_path, f'data_{data_hashcode}')
         if not os.path.exists(f'{dest_path}/simu/simu_nfpt.s.hdr'):
