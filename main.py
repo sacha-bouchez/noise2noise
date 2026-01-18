@@ -7,27 +7,28 @@ from train.trainer import Noise2NoiseTrainer
 if __name__ == "__main__":
 
     trainer = Noise2NoiseTrainer(
-        simulator_type='toy',
-        binsimu=None,
         dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
         dataset_train_size=2048,
         dataset_val_size=512,
         val_freq=1,
         n_epochs=25,
-        batch_size=8,
+        batch_size=4,
         metrics_configs=[
             ['PSNR', {'max_val': 1.0}],
-            ['SSIM', {'max_val': 1.0}],
         ],
         shuffle=True,
-        image_size=[256, 256],
+        image_size=[160, 160],
         voxel_size=[2, 2, 2],
+        n_angles=300,
+        scanner_radius=300,
         nb_counts=1e6,
         learning_rate=1e-4,
         L2_weight=0.0,
         objective_type='poisson',
         num_workers=10,
-        conv_layer_type='standard',
+        conv_layer_type='SinogramConv2d',
+        n_levels=3,
+        global_conv=64,
         seed=42
     )
 

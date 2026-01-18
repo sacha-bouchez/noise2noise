@@ -31,12 +31,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
                        scanner_radius=300,
                        nb_counts=1e6,
                        learning_rate=1e-3,
-                       conv_layer_type='standard',
-                       n_levels=3,
-                       global_conv=16,
+                       conv_layer_type='SinogramConv2d',
+                       n_levels=4,
+                       global_conv=32,
                        num_workers=10,
                        L2_weight=1e-4,
-                       objective_type='MSE',
+                       objective_type='poisson',
                        seed=42):
         self.simulator_type = simulator_type
         self.dest_path = dest_path
