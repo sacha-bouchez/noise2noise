@@ -12,6 +12,15 @@ from phantom_simulation import Phantom2DPetGenerator
 
 from tools.image.castor import read_castor_binary_file
 
+def split_sinogram(sinogram, n_splits=2):
+    """
+    Split a sinogram into several sub-sinogams.
+    """
+
+
+
+
+
 class SinogramGenerator(Dataset):
 
     def __init__(
@@ -140,28 +149,32 @@ class SinogramGenerator(Dataset):
             # Simulate sinogram
             self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path, acquisition_time=self.acquisition_time)
         #
-        data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr').squeeze()
+        data_prompt = read_castor_binary_file(f'{dest_path}/simu/simu_pt.s.hdr')
+        data_prompt = torch.from_numpy(data_prompt)
+        #
+        data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr')
         data_nfpt = torch.from_numpy(data_nfpt)
         #
-        return dest_path, data_nfpt
+        data_gth = read_castor_binary_file(f'{dest_path}/object/object.hdr')
+        data_gth = torch.from_numpy(data_gth)
+        #
+        return dest_path, data_prompt, data_nfpt, data_gth
 
 
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        _, data_nfpt = self.simulate_sinogram(idx)
+        _, prompt, nfpt, gth = self.simulate_sinogram(idx)
 
-        # Generate 2 Poisson noisy versions
-        data_noisy_1 = torch.poisson(data_nfpt)
-        data_noisy_2 = torch.poisson(data_nfpt)
-
-
-        return data_noisy_1, data_noisy_2, data_nfpt
+        return prompt, nfpt, gth
 
     def __getitem__(self, idx):
+        """
+        Output shape : (1, H, W)
+        """
 
-        noisy_1, noisy_2, clean = self.generate_sample(idx)
-        return noisy_1, noisy_2, clean
+        prompt, nfpt, gth = self.generate_sample(idx)
+        return prompt, nfpt, gth
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
 
@@ -200,17 +213,17 @@ if __name__ == '__main__':
 
 
     dest_path = os.path.join(os.getenv("WORKSPACE"), "data", "test")
-    dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42)
+    dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42, scanner_radius=400)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    for i, (noisy_1, noisy_2, clean) in enumerate(loader):
+    for i, (prompt, nfpt, gth) in enumerate(loader):
         pass
 
     fig, ax = plt.subplots(1,3, figsize=(12,4))
-    ax[0].imshow(noisy_1[0], cmap='gray')
-    ax[0].set_title('Noisy 1')
-    ax[1].imshow(noisy_2[0], cmap='gray')
+    ax[0].imshow(prompt[0], cmap='gray')
+    ax[0].set_title('Prompt')
+    ax[1].imshow(nfpt[0], cmap='gray')
     ax[1].set_title('Noisy 2')
-    ax[2].imshow(clean[0], cmap='gray')
+    ax[2].imshow(gth[0], cmap='gray')
     ax[2].set_title('Clean')
     plt.show()

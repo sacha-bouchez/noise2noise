@@ -6,37 +6,47 @@ from train.trainer import Noise2NoiseTrainer
 
 if __name__ == "__main__":
 
+    unet_input_domain = 'photon'
+    unet_output_domain = 'photon'
+
     trainer = Noise2NoiseTrainer(
-        dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
-        dataset_train_size=2048,
-        dataset_val_size=512,
-        val_freq=1,
-        n_epochs=25,
-        batch_size=4,
-        metrics_configs=[
-            ['PSNR', {'max_val': 1.0}],
-        ],
-        shuffle=True,
-        image_size=[160, 160],
-        voxel_size=[2, 2, 2],
-        n_angles=300,
-        scanner_radius=300,
-        nb_counts=1e6,
-        learning_rate=1e-4,
-        L2_weight=0.0,
-        objective_type='poisson',
-        num_workers=10,
-        conv_layer_type='SinogramConv2d',
-        n_levels=3,
-        global_conv=64,
-        seed=42
+            dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
+            dataset_train_size=2048,
+            dataset_val_size=512,
+            val_freq=1,
+            n_epochs=25,
+            batch_size=4,
+            metrics_configs=[],
+            shuffle=True,
+            simulator_config={
+                'image_size' : (160,160),
+                'voxel_size' : (2,2,2),
+                'n_angles' : 300,
+                'acquisition_time' : None, # temporary value, will be overridden
+                'scanner_radius' : 300,
+                'nb_counts' : 1e6,
+            },
+            learning_rate=1e-3,
+            unet_config = {
+                'conv_layer_type': 'SinogramConv2d',
+                'n_levels': 4,
+                'global_conv': 32,
+            },
+            unet_input_domain=unet_input_domain,
+            unet_output_domain=unet_output_domain,
+            reconstruction_algorithm='fbp',
+            reconstruction_config={'filter_name': 'ramp'},
+            n_splits=2,
+            num_workers=10,
+            objective_type='poisson',
+            seed=42
     )
 
     # setup mlflow
     mlflow.set_tracking_uri("http://mlflow:5000")
     #
     # create experiment if not exists
-    experiment_name = "Noise2Noise_Poisson_2DPET_v2_toy"
+    experiment_name = f"Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}"
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
         mlflow.create_experiment(experiment_name)

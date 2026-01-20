@@ -1,4 +1,5 @@
 import os
+import itertools
 import numpy as np
 import mlflow
 import torch
@@ -11,36 +12,45 @@ from noise2noise.model.unet_noise2noise import UNetNoise2Noise as UNet
 
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils.processing import normalize_batch
+from pytorcher.utils import normalize_batch, iradon as iradon_torch
+
 
 class Noise2NoiseTrainer(PytorchTrainer):
 
-    def __init__(self, 
-                       simulator_type='castor',
-                       dest_path='./',
-                       dataset_train_size=10000,
-                       dataset_val_size=500,
-                       val_freq=1,
-                       n_epochs=200,
-                       batch_size=64,
-                       metrics_configs=[],
-                       shuffle=False,
-                       image_size=(256,256),
-                       voxel_size=(2,2,2),
-                       n_angles=300,
-                       scanner_radius=300,
-                       nb_counts=1e6,
-                       learning_rate=1e-3,
-                       conv_layer_type='SinogramConv2d',
-                       n_levels=4,
-                       global_conv=32,
-                       num_workers=10,
-                       L2_weight=1e-4,
-                       objective_type='poisson',
-                       seed=42):
-        self.simulator_type = simulator_type
+    def __init__(
+            self,
+            dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
+            dataset_train_size=2048,
+            dataset_val_size=512,
+            val_freq=1,
+            n_epochs=25,
+            batch_size=4,
+            metrics_configs=[],
+            shuffle=True,
+            simulator_config={
+                'image_size' : (160,160),
+                'voxel_size' : (2,2,2),
+                'n_angles' : 300,
+                'acquisition_time' : 253.3, # temporary value, will be overridden
+                'scanner_radius' : 300,
+                'nb_counts' : 1e6,
+            },
+            learning_rate=1e-3,
+            unet_config = {
+                'conv_layer_type': 'SinogramConv2d',
+                'n_levels': 4,
+                'global_conv': 32,
+            },
+            unet_input_domain='photon',
+            unet_output_domain='photon',
+            reconstruction_algorithm='fbp',
+            reconstruction_config={'filter_name': 'ramp'},
+            n_splits=2,
+            num_workers=10,
+            objective_type='poisson',
+            seed=42
+        ):
         self.dest_path = dest_path
-        self.model_name = 'Noise2Noise_2DPET_SinogramDenoiser'
         self.dataset_train_size = dataset_train_size
         self.dataset_val_size = dataset_val_size
         self.val_freq = val_freq
@@ -48,21 +58,36 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.batch_size = batch_size
         self.metrics_configs = metrics_configs
         self.shuffle = shuffle
-        self.image_size = image_size
-        self.voxel_size = voxel_size
-        self.n_angles = n_angles
-        self.scanner_radius = scanner_radius
-        self.nb_counts = nb_counts
+        self.simulator_config = simulator_config
         self.learning_rate = learning_rate
+
+        # Validate task parameters
+        assert unet_input_domain in ['photon', 'image'], "unet_input_domain must be either 'photon' or 'image'."
+        assert unet_output_domain in ['photon', 'image'], "unet_output_domain must be either 'photon' or 'image'."
+        if unet_input_domain not in ['photon', 'image'] or unet_output_domain not in ['photon', 'image']:
+            raise ValueError("unet_input_domain and unet_output_domain must be either 'photon' or 'image'.")
+        if unet_input_domain != unet_output_domain:
+            assert unet_input_domain == 'photon' and unet_output_domain == 'image', "Only photon to image domain conversion is supported."
+        if unet_input_domain == 'image':
+            assert reconstruction_algorithm is not None and reconstruction_algorithm in ['fbp'], "Currently only 'fbp' reconstruction is supported."
+        assert n_splits > 1, "n_splits must be greater than 1 for noise2noise training."
+        self.unet_config = unet_config
+        self.unet_input_domain = unet_input_domain
+        self.unet_output_domain = unet_output_domain
+        self.model_name = f'Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}'
+        self.reconstruction_algorithm = reconstruction_algorithm
+        self.reconstruction_config = reconstruction_config
+        self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
+
+        # 
+        if self.unet_output_domain == 'image':
+            assert objective_type.lower() in ['mse'], "When output domain is 'image', only 'MSE' is supported."
+        else:
+            assert objective_type.lower() in ['poisson', 'mse', 'mse_anscombe'], "When output domain is 'photon', only 'Poisson' and 'MSE' are supported."
         self.objective_type = objective_type
         self.seed = seed
 
-        self.conv_layer_type = conv_layer_type
-        self.n_levels = n_levels
-        self.global_conv = global_conv
-
         self.num_workers = num_workers
-        self.L2_weight = L2_weight
 
         self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
 
@@ -77,13 +102,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.dataset_train = SinogramGenerator(
                                          dest_path=os.path.join(self.dest_path, 'train'),
                                          length=self.dataset_train_size,
-                                         image_size=self.image_size,
-                                         voxel_size=self.voxel_size,
-                                         n_angles=self.n_angles,
-                                         acquisition_time=253.3, # temporary value, will be overridden
-                                         scanner_radius=self.scanner_radius,
-                                         nb_counts=self.nb_counts,
-                                         seed=self.seed
+                                         seed=self.seed,
+                                         **self.simulator_config
         )
         loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
 
@@ -91,15 +111,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.dataset_val = SinogramGenerator(
                                          dest_path=os.path.join(self.dest_path, 'val'),
                                          length=self.dataset_val_size,
-                                         image_size=self.image_size,
-                                         voxel_size=self.voxel_size,
-                                         n_angles=self.n_angles,
-                                         scanner_radius=self.scanner_radius,
-                                         acquisition_time=self.dataset_train.acquisition_time,
-                                         nb_counts=self.nb_counts,
-                                         seed=self.dataset_val_seed
+                                         seed=self.dataset_val_seed,
+                                         **self.simulator_config
         )
         loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+        self.image_size = self.dataset_train.image_size
 
         return loader_train, loader_val
 
@@ -115,20 +132,17 @@ class Noise2NoiseTrainer(PytorchTrainer):
     def create_model(self):
         # model expects channel-first inputs: we'll add channel dimension when calling
         model = UNet(
-            n_channels=1,
-            n_classes=1,
-            global_conv=self.global_conv,
-            n_levels=self.n_levels,
-            bilinear=True,
-            layer_type=self.conv_layer_type,
-            normalize_input=True
+            unet_args = {'n_channels': 1, 'n_classes': 1, 'bilinear': True, 'normalize_input': True, **self.unet_config},
+            unet_input_domain=self.unet_input_domain,
+            unet_output_domain=self.unet_output_domain,
+            reconstruction_algorithm=self.reconstruction_algorithm,
+            n_splits=self.n_splits,
         )
         model = model.to(self.device)
         return model
 
     def get_objective(self):
         type = self.objective_type.lower()
-        assert type in ['mse', 'poisson', 'mse_anscombe'], "Objective type not recognized. Supported types: 'MSE', 'Poisson', 'MSE_Anscombe'."
         if 'mse' in type:
             objective = torch.nn.MSELoss()
         elif type == 'poisson':
@@ -149,6 +163,24 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # Reset metric
             metric.reset_states()
 
+    def reconstruction(self, x, **kwargs):
+        """
+        Apply reconstruction algorithm to batch of sinogram x.
+        
+        :param x: (B, C, H, W) sinogram tensor
+        """
+        out = torch.empty_like(x)
+        for i in range(x.shape[0]):
+            sino = x.select(0, i) # (C, H, W)
+            if self.reconstruction_algorithm.lower() == 'fbp':
+                sino = sino.squeeze(0)  # (H, W)
+                recon = iradon_torch(sino, output_size=max(self.image_size), **kwargs)  # (H, W)
+                recon = recon.unsqueeze(0)  # (1, H, W)
+            else:
+                raise NotImplementedError(f'Reconstruction algorithm {self.reconstruction_algorithm} not implemented yet.')
+            out[i] = recon
+        return out
+
     def fit(self):
 
         def anscombe(x):
@@ -159,8 +191,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
             if self.objective_type.lower() == 'poisson':
                 loss = self.objective(output, target)
             elif self.objective_type.lower() == 'mse':
-                eps = 1.0 # to avoid division by zero, tuned according to Poisson range
-                loss = self.objective(output / torch.sqrt(target + eps), target / torch.sqrt(target + eps)) # heteroscedastic MSE
+                if self.unet_output_domain == 'photon':
+                    eps = 1.0 # to avoid division by zero, tuned according to Poisson range
+                    loss = self.objective(output / torch.sqrt(target + eps), target / torch.sqrt(target + eps)) # heteroscedastic MSE
+                else:
+                    loss = self.objective(output, target)
             elif self.objective_type.lower() == 'mse_anscombe':
                 if not self.model.training:
                     output = anscombe(output) # At inference time, rescale back to Anscombe domain
@@ -185,32 +220,43 @@ class Noise2NoiseTrainer(PytorchTrainer):
             m_dict = {}
 
             # TRAIN
-            for batch_idx, (noisy_img1, noisy_img2, clean_img) in enumerate(self.loader_train):
+            for batch_idx, (prompt, nfpt, gth) in enumerate(self.loader_train):
 
-                # ensure channel dimension: dataset returns (B, H, W)
-                if noisy_img1.dim() == 3:
-                    noisy_img1 = noisy_img1.unsqueeze(1)
-                if noisy_img2.dim() == 3:
-                    noisy_img2 = noisy_img2.unsqueeze(1)
-                if clean_img.dim() == 3:
-                    clean_img = clean_img.unsqueeze(1)
+                # Set seed for given batch for reproducibility
+                torch.manual_seed(self.seed + batch_idx)
+                torch.cuda.manual_seed_all(self.seed + batch_idx)
+
+                # Set target for task
+                if self.unet_output_domain == 'image':
+                    target = gth
+                else:
+                    target = nfpt
                 
                 # Move data to device
-                noisy_img1 = noisy_img1.to(self.device)
-                noisy_img2 = noisy_img2.to(self.device)
-                clean_img = clean_img.to(self.device)
+                prompt = prompt.to(self.device).float()
+                target = target.to(self.device).float()
 
-                noisy_img1 = noisy_img1.float()
-                noisy_img2 = noisy_img2.float()
-                clean_img = clean_img.float()
+                # split prompt with binomial statistics
+                splitted_prompts = [torch.distributions.binomial.Binomial(total_count=prompt, probs=1/self.n_splits).sample() for _ in range(self.n_splits)]
+                pairwise_permutations = list(itertools.permutations(range(self.n_splits), 2))
+                split_losses = []
+                #
 
-                # Inference and loss computation for pair 1
-                loss_1 = inference_pair_loss_metrics(noisy_img1, noisy_img2, clean_img)
-                # Inference and loss computation for pair 2
-                loss_2 = inference_pair_loss_metrics(noisy_img2, noisy_img1, clean_img)
+                # Apply reconstruction if needed
+                if self.unet_input_domain == 'image':
+                    x = [self.reconstruction(s) for s in splitted_prompts]
+                else:
+                    x = splitted_prompts
 
+                # Denoise and compute loss on all pairs
+                for (i, j) in pairwise_permutations:
+                    x_i = x[i]
+                    x_j = x[j]
+                    # Inference and loss computation for pair (i, j)
+                    loss_ij = inference_pair_loss_metrics(x_i, x_j, target)
+                    split_losses.append(loss_ij)
                 # global loss
-                loss = 1/2 * ( loss_1 + loss_2 ) # NOTE the .5 factor is used for learning rate scaling consistency with standard supervised training
+                loss = sum(split_losses) / len(split_losses)  # average over all pairs
                 # Backpropagation
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -229,22 +275,47 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # run model in evaluation mode and avoid building computation graph
                 self.model.eval()
                 with torch.no_grad():
-                    for batch_idx, (noisy_img, _, clean_img) in enumerate(self.loader_val):
-                        noisy_img = noisy_img.to(self.device)
-                        clean_img = clean_img.to(self.device)
+                    for batch_idx, (prompt, nfpt, gth) in enumerate(self.loader_val):
 
-                        if noisy_img.dim() == 3:
-                            noisy_img = noisy_img.unsqueeze(1)
-                        if clean_img.dim() == 3:
-                            clean_img = clean_img.unsqueeze(1)
+                        # set target for task
+                        if self.unet_output_domain == 'image':
+                            target = gth
+                        else:
+                            target = nfpt
 
-                        noisy_img = noisy_img.float()
-                        clean_img = clean_img.float()
+                        # move data to device
+                        prompt = prompt.to(self.device).float()
+                        target = target.to(self.device).float()
 
-                        output = self.model(noisy_img)
-                        val_loss = compute_loss(output, noisy_img)
-                        self.update_metrics(val_loss, normalize_batch(clean_img), normalize_batch(output))
+                        # Split data with binomial statistics. This is done to match training data distribution
+                        splits = [torch.distributions.binomial.Binomial(total_count=prompt, probs=1/self.n_splits).sample() for _ in range(self.n_splits)]
+
+                        # Concatenate splits along batch dimension
+                        splits = torch.cat(splits, dim=0)
+
+                        # Apply reconstruction if needed
+                        if self.unet_input_domain == 'image':
+                            x = self.reconstruction(splits)
+                        else:
+                            x = splits
+
+                        # Denoise
+                        x_denoised = self.model(x)
+
+                        # Expand batch dimension to recover splits
+                        x_denoised = x_denoised.view(self.n_splits, -1, *x_denoised.shape[1:])  # (n_splits, B, C, H, W)
+
+                        # Aggregate splits
+                        if self.unet_output_domain == 'image':
+                            output = torch.mean(x_denoised, dim=0)  # (B, C, H, W)
+                        else:
+                            output = torch.sum(x_denoised, dim=0)  # (B, C, H, W)
+
+                        # Compute loss and update metrics
+                        val_loss = compute_loss(output, target)
+                        self.update_metrics(val_loss, normalize_batch(nfpt), normalize_batch(output))
                         
+                        #
                         print(f'Epoch [{epoch+1}/{self.n_epochs}], Validation, Step [{batch_idx+1}/{len(self.loader_val)}]')
 
                 # print and reset metrics
