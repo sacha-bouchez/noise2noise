@@ -5,7 +5,7 @@ class UNetNoise2Noise(UNet):
 
     """
     U-Net model for Noise2Noise.
-    Outputs are in the photon/Poisson domain, hence the rescale stage when using 'mse_anscombe' loss at inference time.
+    If outputs are in the photon/Poisson domain using 'mse_anscombe' loss, apply the rescale stage at inference time.
     """
 
     def forward(self, x):
