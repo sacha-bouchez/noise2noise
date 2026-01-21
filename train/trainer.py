@@ -216,20 +216,14 @@ class Noise2NoiseTrainer(PytorchTrainer):
         :return: list of n_splits sinogram tensors, each of shape (B, C, H, W)
         """
         if mode == 'multinomial':
-            n = self.n_splits
-            # Sample probabilities from a Dirichlet distribution
-            alpha = torch.ones(n, device=prompt.device)
-            probs = torch.distributions.Dirichlet(alpha).sample(prompt.shape)  # (B, C, H, W, n)
-
-            splits = torch.floor(probs * prompt.unsqueeze(-1)).permute(4, 0, 1, 2, 3)  # (n, B, C, H, W)
-
-            residual = prompt - splits.sum(dim=0)  # (B, C, H, W)
-            splits[-1] += residual  # add residual to last split
-            for i in range(splits.shape[1]):
-                assert prompt[i, ...].sum() == splits[:, i, ...].sum(), "Splits do not sum up to original prompt!"
-            
-            # Cast splits to list of tensors
-            splits = torch.unbind(splits, dim=0)  # list of n tensors of shape (B, C, H, W)
+            splits = []
+            remaining = prompt
+            for i in range(self.n_splits - 1):
+                split_i = torch.distributions.Binomial(total_count=remaining, probs=1/(self.n_splits - i)).sample()
+                splits.append(split_i)
+                remaining = remaining - split_i
+            # Final split gets the remaining counts
+            splits.append(remaining)
         else:
             raise ValueError(f'Unknown split mode: {mode}')
         return splits
