@@ -67,9 +67,13 @@ class SinogramGenerator(Dataset):
 
     def __len__(self):
         return self.length
+    
 
     def get_generator_hashcode(self):
-        serialized = json.dumps(self.__dict__, sort_keys=True, separators=(",", ":"))
+        dict_to_hash = self.__dict__.copy()
+        # remove non hashable items
+        dict_to_hash.pop('length', None)
+        serialized = json.dumps(dict_to_hash, sort_keys=True, separators=(",", ":"))
         return hashlib.md5(serialized.encode("utf-8")).hexdigest()[:8]
 
     def set_acquisition_time(self, n_samples=100):
