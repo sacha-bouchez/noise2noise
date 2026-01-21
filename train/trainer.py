@@ -197,7 +197,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # jointly reconstruct i-th batch sample(s) (multiple sinograms may be provided)
             batch_i_sinos = [ xx.select(0, i) for xx in x ]  # list of (C, H, W)
             if self.reconstruction_algorithm.lower() == 'fbp':
-                recon = [ iradon_torch(sino.squeeze(0), output_size=max(self.image_size), **kwargs).unsqueeze(0) for sino in batch_i_sinos ]  # list of (C, H, W)
+                recon = [ iradon_torch(torch.transpose(sino.squeeze(0), 0, 1), circle=False, output_size=max(self.image_size), **kwargs).unsqueeze(0) for sino in batch_i_sinos ]  # list of (C, H, W)
                 recon = torch.stack(recon, dim=0)  # (n_sinos, C, H, W)
                 recon = torch.mean(recon, dim=0)  # (C, H, W)
             else:
