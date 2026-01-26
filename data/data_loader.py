@@ -153,7 +153,8 @@ class SinogramGenerator(Dataset):
             # Simulate sinogram
             self.sinogram_simulator.run(img_path=obj_path, img_att_path=att_path, dest_path=dest_path, acquisition_time=self.acquisition_time)
         #
-        data_prompt = read_castor_binary_file(f'{dest_path}/simu/simu_pt.s.hdr')
+        data_prompt, prompt_metadata = read_castor_binary_file(f'{dest_path}/simu/simu_pt.s.hdr', return_metadata=True)
+        scale_factor = float(prompt_metadata.get('scale_factor', 1.0)) # Used for reconstruction
         data_prompt = torch.from_numpy(data_prompt)
         #
         data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr')
@@ -162,23 +163,23 @@ class SinogramGenerator(Dataset):
         data_gth = read_castor_binary_file(f'{dest_path}/object/object.hdr')
         data_gth = torch.from_numpy(data_gth)
         #
-        return dest_path, data_prompt, data_nfpt, data_gth
+        return dest_path, data_prompt, data_nfpt, data_gth, scale_factor
 
 
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        _, prompt, nfpt, gth = self.simulate_sinogram(idx)
+        _, prompt, nfpt, gth, scale_factor = self.simulate_sinogram(idx)
 
-        return prompt, nfpt, gth
+        return prompt, nfpt, gth, scale_factor
 
     def __getitem__(self, idx):
         """
         Output shape : (1, H, W)
         """
 
-        prompt, nfpt, gth = self.generate_sample(idx)
-        return prompt, nfpt, gth
+        prompt, nfpt, gth, scale = self.generate_sample(idx)
+        return prompt, nfpt, gth, scale
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
 

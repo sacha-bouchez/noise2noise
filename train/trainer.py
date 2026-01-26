@@ -189,14 +189,21 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # Reset metric
             metric.reset_states()
 
-    def reconstruction(self, *x, **kwargs):
+    def reconstruction(self, *x, scale=None, **kwargs):
         """
         Apply reconstruction algorithm to batches of sinograms x's.
         
         :param x: (B, C, H, W) sinogram tensor
+        :param scale: (B,) scale factor to be applied to sinogram before reconstruction
+        :return: (B, C, H, W) reconstructed image tensor
         """
         batch_size = x[0].shape[0]
         out = []
+        # divide by scale factor if provided
+        # Have to divide each batch sample separately as scale factors may differ
+        if scale is not None:
+            x = [ xx / scale.view(-1, 1, 1, 1) for xx in x ]  # list of (B, C, H, W)
+        # reconstruct each batch sample            
         for i in range(batch_size):
             # jointly reconstruct i-th batch sample(s) (multiple sinograms may be provided)
             batch_i_sinos = [ xx.select(0, i) for xx in x ]  # list of (C, H, W)
@@ -313,9 +320,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
         
         for epoch in range(self.initial_epoch, self.n_epochs):
 
+            if epoch == 0:
+                self.compute_reference_metrics()
+
             m_dict_train = {}
             # TRAIN
-            for batch_idx, (prompt, nfpt, gth) in enumerate(self.loader_train):
+            self.model.train()
+            for batch_idx, (prompt, nfpt, gth, scale) in enumerate(self.loader_train):
 
                 # Set seed for given batch for reproducibility
                 torch.manual_seed(self.seed + epoch + batch_idx)
@@ -330,6 +341,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # Move data to device
                 prompt = prompt.to(self.device).float()
                 target = target.to(self.device).float()
+                scale = scale.to(self.device).float()
 
                 # split prompt with multinomial statistics
                 splitted_prompts = self.split_prompt(prompt, mode='multinomial')
@@ -339,7 +351,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 # Apply reconstruction if needed
                 if self.unet_input_domain == 'image':
-                    x = [self.reconstruction(s) for s in splitted_prompts]
+                    x = [self.reconstruction(s, scale=scale) for s in splitted_prompts]
                 else:
                     x = splitted_prompts
 
@@ -374,7 +386,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # run model in evaluation mode and avoid building computation graph
                 self.model.eval()
                 with torch.no_grad():
-                    for batch_idx, (prompt, nfpt, gth) in enumerate(self.loader_val):
+                    for batch_idx, (prompt, nfpt, gth, scale) in enumerate(self.loader_val):
 
                         # Set seed for given batch for reproducibility
                         torch.manual_seed(self.seed + batch_idx)
@@ -389,16 +401,19 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         # move data to device
                         prompt = prompt.to(self.device).float()
                         target = target.to(self.device).float()
+                        scale = scale.to(self.device).float()
 
                         # Split data with multinomial statistics. This is done to match training data distribution
                         splits = self.split_prompt(prompt, mode='multinomial')
 
                         # Concatenate splits along batch dimension
                         splits = torch.cat(splits, dim=0)
+                        # stack scale accordingly
+                        scale = (scale / self.n_splits).repeat(self.n_splits) # Dividing the number of counts by n_splits is equivalent to dividing scale factor by n_splits
 
                         # Apply reconstruction if needed
                         if self.unet_input_domain == 'image':
-                            splits = self.reconstruction(splits)
+                            splits = self.reconstruction(splits, scale=scale)
 
                         # Denoise
                         splits_denoised = self.model(splits)
@@ -418,7 +433,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
-                            output = self.reconstruction(*splits_denoised) # (B, C, H, W)
+                            output = self.reconstruction(*splits_denoised, scale=scale) # (B, C, H, W)
                         else:
                             splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
                             output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)
@@ -426,6 +441,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         # Update im_ metrics for validation
                         metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('im_') ]
                         self.update_metrics(None, normalize_batch(gth), normalize_batch(output), metric_names=metrics_to_update)
+                        # TODO compare im_ metrics with reconstruction without denoising and with nfpt only
                         
                         #
                         m_dict_val = {f'val_{metric.name}': metric.result() for metric in self.metrics}
@@ -436,9 +452,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     # print(f'{metric.name}: {metric.result():.4f}')
                     # m_dict.update({f'val_{metric.name}': metric.result()})
                     metric.reset_states()
-
-                # ensure we go back to training mode after validation
-                self.model.train()
 
             # metric monitoring
             m_dict = {**m_dict_train, **m_dict_val}
