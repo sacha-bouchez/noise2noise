@@ -98,7 +98,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
 
 
     
-    def compute_bias_and_standard_deviation(self, n_samples=100, mask_threshold=1e-3, noise2noise=True):
+    def compute_bias_and_standard_deviation(self, n_samples=100, mask_threshold=1e-3, noise2noise_only=False, noise2noise=True, split=True):
 
         if not self.is_simulated:
             self.run_simulation()
@@ -111,36 +111,49 @@ class SingleImageInferencePipeline(PytorchTrainer):
         scale = float(metadata.get('scale_factor', '1.0'))
         scale = torch.tensor([scale], dtype=torch.float32).to(self.device)
 
-        expectation = np.zeros_like(gth)
-        expectation_square = np.zeros_like(gth)
+        if noise2noise_only and self.model.unet_output_domain == 'photon':
+            reference = nfpt
+        else:
+            reference = gth
+        
+        expectation = np.zeros_like(reference)
+        expectation_square = np.zeros_like(reference)
 
         with torch.no_grad():
             for _ in range(n_samples):
                 
-                if noise2noise:
+                if noise2noise_only:
                     prompt = torch.poisson(nfpt_tensor)
-                    im_recon = self.model.forward(prompt, scale, split=True)
+                    x = self.model.noise2noise_module(prompt)
                 else:
-                    prompt = torch.poisson(nfpt_tensor / self.model.n_splits)
-                    im_recon = self.model.reconstruction(prompt, scale=scale)
+                    if noise2noise:
+                        prompt = torch.poisson(nfpt_tensor)
+                        x = self.model.forward(prompt, scale, split=split)
+                    else:
+                        if split:
+                            prompt = torch.poisson(nfpt_tensor / self.model.n_splits)
+                        else:
+                            prompt = torch.poisson(nfpt_tensor)
+                        x = self.model.reconstruction(prompt, scale=scale)
                 #
                 #
-                expectation += im_recon.cpu().numpy().squeeze(0)
-                expectation_square += (im_recon.cpu().numpy() ** 2).squeeze(0)
+                expectation += x.cpu().numpy().squeeze(0)
+                expectation_square += (x.cpu().numpy() ** 2).squeeze(0)
 
         expectation /= n_samples
         expectation_square /= n_samples
-        gth = gth.squeeze()
+
+        reference = reference.squeeze()
         expectation = expectation.squeeze()
         expectation_square = expectation_square.squeeze()
 
-        gth_mask = gth > mask_threshold
+        reference_mask = reference > mask_threshold
 
-        bias = np.where(gth_mask, 100 * (expectation - gth) / gth, np.nan)
-        variance = np.where(gth_mask, 100 * (expectation_square - expectation ** 2) / gth ** 2, np.nan)
+        bias = np.where(reference_mask, 100 * (expectation - reference) / reference, np.nan)
+        variance = np.where(reference_mask, 100 * (expectation_square - expectation ** 2) / reference ** 2, np.nan)
         standard_deviation = np.sqrt(variance)
 
-        return gth, bias, standard_deviation
+        return reference, bias, standard_deviation
 
     def prepare_input(self, file_path):
         """
@@ -181,7 +194,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
         with torch.no_grad():
             x_recon = self.model.forward(x, scale=scale, split=False)
             x_recon = x_recon.squeeze(0)  # remove batch dimension
-        #
+        #w', f
         write_binary_file(
             file_path=os.path.join(dest_path, 'recon_image.hdr'),
             metadata={'scale_factor': str(scale.item())},
@@ -282,48 +295,65 @@ if __name__ == "__main__":
     plt.savefig(os.path.join(dest_path, f'recon_images_final_{int(inference_pipeline.nb_counts)}.png'))
 
     #
-    n_samples = 100
+    n_samples = 10
     mask_threshold = 1  # in kBq/mL
 
     # init figure
-    fig, ax = plt.subplots(2,3, figsize=(15,15))
+    fig, ax = plt.subplots(3,3, figsize=(15,15))
     fig.suptitle(f'Bias and standard deviation Analysis over {n_samples} Samples and {mask_threshold} kBq/mL Threshold', fontsize=16)
     plt.setp(ax, xticks=[], yticks=[])
 
-    # With noise2noise
-    gth, bias, standard_deviation = inference_pipeline.compute_bias_and_standard_deviation(n_samples=n_samples, mask_threshold=mask_threshold, noise2noise=True)
-    ax[0, 0].imshow(gth, cmap='gray_r')
-    ax[0, 0].set_title('Activity Concentration (kBq/mL)')
-    ax[0, 0].annotate(f'Max: {np.max(gth):.2f} kBq/mL\nMin: {np.min(gth):.2f} kBq/mL', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    # Noise2Noise only
+    nfpt, bias, standard_deviation = inference_pipeline.compute_bias_and_standard_deviation(n_samples=n_samples, mask_threshold=mask_threshold, noise2noise_only=True)
+    ax[0, 0].imshow(nfpt, cmap='gray')
+    ax[0, 0].set_title('Noise-Free Prompt Sinogram')
     fig.colorbar(ax[0,0].images[0], ax=ax[0,0])
     ax[0,1].imshow(bias, cmap='magma')
-    ax[0,1].set_title('N2N + Reconstructor Bias (%)')
+    ax[0,1].set_title('N2N Bias (%)')
     roi_size = np.sum(~np.isnan(bias))
     scala_bias = (1 / roi_size) * np.sqrt(np.nansum(bias ** 2))
-    ax[0, 1].annotate(f'Scalar Relative Bias: {scala_bias:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    ax[0, 1].annotate(f'Scalar Relative Bias: {scala_bias:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='white', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[0,1].images[0], ax=ax[0,1])
     ax[0,2].imshow(standard_deviation, cmap='magma')
-    ax[0,2].set_title('N2N + Reconstructor standard_deviation (%)')
+    ax[0,2].set_title('N2N standard_deviation (%)')
     scalar_standard_deviation = np.nanmean(standard_deviation)
-    ax[0, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    ax[0, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='white', fontsize=10, verticalalignment='top')
     fig.colorbar(ax[0,2].images[0], ax=ax[0,2])
+
+    # With noise2noise
+    gth, bias, standard_deviation = inference_pipeline.compute_bias_and_standard_deviation(n_samples=n_samples, mask_threshold=mask_threshold, noise2noise=True)
+    ax[1, 0].imshow(gth, cmap='gray_r')
+    ax[1, 0].set_title('Activity Concentration (kBq/mL)')
+    ax[1, 0].annotate(f'Max: {np.max(gth):.2f} kBq/mL\nMin: {np.min(gth):.2f} kBq/mL', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    fig.colorbar(ax[1,0].images[0], ax=ax[1,0])
+    ax[1,1].imshow(bias, cmap='magma')
+    ax[1,1].set_title('N2N + Reconstructor Bias (%)')
+    roi_size = np.sum(~np.isnan(bias))
+    scala_bias = (1 / roi_size) * np.sqrt(np.nansum(bias ** 2))
+    ax[1, 1].annotate(f'Scalar Relative Bias: {scala_bias:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    fig.colorbar(ax[1,1].images[0], ax=ax[1,1])
+    ax[1,2].imshow(standard_deviation, cmap='magma')
+    ax[1,2].set_title('N2N + Reconstructor standard_deviation (%)')
+    scalar_standard_deviation = np.nanmean(standard_deviation)
+    ax[1, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    fig.colorbar(ax[1,2].images[0], ax=ax[1,2])
 
     # Without noise2noise
     gth_noisy, bias_noisy, standard_deviation_noisy = inference_pipeline.compute_bias_and_standard_deviation(n_samples=n_samples, mask_threshold=mask_threshold, noise2noise=False)
     # remove ax[1,0] axis
-    ax[1,0].axis('off')
+    ax[2,0].axis('off')
     # fig.colorbar(ax[1,0].images[0], ax=ax[1,0])
-    ax[1,1].imshow(bias_noisy, cmap='magma')
-    ax[1,1].set_title('Reconstructor Bias (%)')
+    ax[2,1].imshow(bias_noisy, cmap='magma')
+    ax[2,1].set_title('Reconstructor Bias (%)')
     roi_size_noisy = np.sum(~np.isnan(bias_noisy))
     scala_bias_noisy = (1 / roi_size_noisy) * np.sqrt(np.nansum(bias_noisy ** 2))
-    ax[1, 1].annotate(f'Scalar Relative Bias: {scala_bias_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
-    fig.colorbar(ax[1,1].images[0], ax=ax[1,1])
-    ax[1,2].imshow(standard_deviation_noisy, cmap='magma')
-    ax[1,2].set_title('Reconstructor standard_deviation (%)')
+    ax[2, 1].annotate(f'Scalar Relative Bias: {scala_bias_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    fig.colorbar(ax[2,1].images[0], ax=ax[2,1])
+    ax[2,2].imshow(standard_deviation_noisy, cmap='magma')
+    ax[2,2].set_title('Reconstructor standard_deviation (%)')
     scalar_standard_deviation_noisy = np.nanmean(standard_deviation_noisy)
-    ax[1, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
-    fig.colorbar(ax[1,2].images[0], ax=ax[1,2])
+    ax[2, 2].annotate(f'Scalar Relative standard_deviation: {scalar_standard_deviation_noisy:.2f} %', xy=(0.05, 0.95), xycoords='axes fraction', color='black', fontsize=10, verticalalignment='top')
+    fig.colorbar(ax[2,2].images[0], ax=ax[2,2])
 
     plt.tight_layout()
     plt.savefig(os.path.join(dest_path, 'denoiser_and_reconstructor_bias_standard_deviation.jpg'), dpi=150)
