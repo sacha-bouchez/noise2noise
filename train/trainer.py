@@ -96,6 +96,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
         metrics.extend([
             [ 'PSNR', { 'name': 'im_psnr'} ],
             [ 'SSIM', { 'name': 'im_ssim'} ],
+            [ 'PSNR', { 'name': 'val_nfpt_im_psnr'} ],
+            [ 'SSIM', { 'name': 'val_nfpt_im_ssim'} ],
+            [ 'PSNR', { 'name': 'val_prompt_im_psnr'} ],
+            [ 'SSIM', { 'name': 'val_prompt_im_ssim'} ],
             [ 'PSNR', { 'name': 'n2n_psnr'} ],
         ])
         if self.unet_output_domain == 'image':
@@ -227,6 +231,47 @@ class Noise2NoiseTrainer(PytorchTrainer):
         else:
             raise ValueError(f'Unknown split mode: {mode}')
         return splits
+
+    def compute_reference_metrics(self):
+        """
+        Compute some reference metrics on validation set before training starts.
+        This is useful to compare reconstruction results against.
+        We compute the reconstruction from the noise-free sinogram (nfpt) only. This metric cannot be beaten by denoising.
+        We compute the reconstruction from the prompt sinogram only. This metric must be beaten by denoising.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, (prompt, nfpt, gth, scale) in enumerate(self.loader_val):
+
+                print(f'Computing reference metrics, batch {batch_idx+1}/{len(self.loader_val)} ...')
+
+                # move data to device
+                prompt = prompt.to(self.device).float()
+                nfpt = nfpt.to(self.device).float()
+                gth = gth.to(self.device).float()
+                scale = scale.to(self.device).float()
+
+                # reconstruction from noise-free sinogram
+                recon_nfpt = self.reconstruction(nfpt, scale=scale)
+                # update im_ metrics for reference
+                metrics_to_update = [ m.name for m in self.metrics if 'nfpt' in m.name ]
+                self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
+
+                # reconstruction from prompt sinogram
+                recon_prompt = self.reconstruction(prompt, scale=scale)
+                # update im_ metrics for reference
+                metrics_to_update = [ m.name for m in self.metrics if 'prompt' in m.name ]
+                self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
+
+            print('Reference metrics on validation set before training:')
+            for metric in self.metrics:
+                if 'nfpt' in metric.name or 'prompt' in metric.name:
+                    print(f'{metric.name}: {metric.result():.4f}')
+                    mlflow.log_metric(metric.name, metric.result())
+                    metric.reset_states()
+
+            # Remove reference metrics from trainer metrics list
+            self.metrics = [ m for m in self.metrics if 'nfpt' not in m.name and 'prompt' not in m.name ]
 
     def fit(self):
 
