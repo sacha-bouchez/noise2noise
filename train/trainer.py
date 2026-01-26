@@ -9,13 +9,14 @@ from torch.utils.data import DataLoader
 
 from noise2noise.data.data_loader import SinogramGenerator
 from noise2noise.model.unet_noise2noise import UNetNoise2Noise as UNet
+from noise2noise.model.unet_noise2noise import UnetNoise2NoiseCommons
 
 from pytorcher.trainer import PytorchTrainer
 
 from pytorcher.utils import normalize_batch, iradon as iradon_torch
 
 
-class Noise2NoiseTrainer(PytorchTrainer):
+class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoiseCommons):
 
     def __init__(
             self,
@@ -188,56 +189,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
             # Reset metric
             metric.reset_states()
-
-    def reconstruction(self, *x, scale=None, **kwargs):
-        """
-        Apply reconstruction algorithm to batches of sinograms x's.
-        
-        :param x: (B, C, H, W) sinogram tensor
-        :param scale: (B,) scale factor to be applied to sinogram before reconstruction
-        :return: (B, C, H, W) reconstructed image tensor
-        """
-        batch_size = x[0].shape[0]
-        out = []
-        # divide by scale factor if provided
-        # Have to divide each batch sample separately as scale factors may differ
-        if scale is not None:
-            x = [ xx / scale.view(-1, 1, 1, 1) for xx in x ]  # list of (B, C, H, W)
-        # reconstruct each batch sample            
-        for i in range(batch_size):
-            # jointly reconstruct i-th batch sample(s) (multiple sinograms may be provided)
-            batch_i_sinos = [ xx.select(0, i) for xx in x ]  # list of (C, H, W)
-            if self.reconstruction_algorithm.lower() == 'fbp':
-                recon = [ iradon_torch(torch.transpose(sino.squeeze(0), 0, 1), circle=False, output_size=max(self.image_size), **kwargs).unsqueeze(0) for sino in batch_i_sinos ]  # list of (C, H, W)
-                recon = torch.stack(recon, dim=0)  # (n_sinos, C, H, W)
-                recon = torch.mean(recon, dim=0)  # (C, H, W)
-            else:
-                raise NotImplementedError(f'Reconstruction algorithm {self.reconstruction_algorithm} not implemented yet.')
-            out.append(recon)
-        out = torch.stack(out, dim=0)  # (B, C, H, W)
-        # reshape to (B, C, H, W)
-        out = out.view(-1, out.shape[1], out.shape[-2], out.shape[-1])
-        return out
-
-    def split_prompt(self, prompt, mode='multinomial'):
-        """
-        Split prompt sinogram into n_splits sinograms with multinomial statistics.
-        
-        :param prompt: (B, C, H, W) sinogram tensor
-        :return: list of n_splits sinogram tensors, each of shape (B, C, H, W)
-        """
-        if mode == 'multinomial':
-            splits = []
-            remaining = prompt
-            for i in range(self.n_splits - 1):
-                split_i = torch.distributions.Binomial(total_count=remaining, probs=1/(self.n_splits - i)).sample()
-                splits.append(split_i)
-                remaining = remaining - split_i
-            # Final split gets the remaining counts
-            splits.append(remaining)
-        else:
-            raise ValueError(f'Unknown split mode: {mode}')
-        return splits
 
     def compute_reference_metrics(self):
         """
