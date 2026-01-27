@@ -32,34 +32,22 @@ class UnetNoise2NoiseCommons:
     """
 
     def reconstruction(self, *x, scale=None, **kwargs):
-        """
-        Apply reconstruction algorithm to batches of sinograms x's.
-        
-        :param x: (B, C, H, W) sinogram tensor
-        :param scale: (B,) scale factor to be applied to sinogram before reconstruction
-        :return: (B, C, H, W) reconstructed image tensor
-        """
-        batch_size = x[0].shape[0]
-        out = []
-        # divide by scale factor if provided
-        # Have to divide each batch sample separately as scale factors may differ
         if scale is not None:
             x = [ xx / scale.view(-1, 1, 1, 1) for xx in x ]  # list of (B, C, H, W)
-        # reconstruct each batch sample            
-        for i in range(batch_size):
-            # jointly reconstruct i-th batch sample(s) (multiple sinograms may be provided)
-            batch_i_sinos = [ xx.select(0, i) for xx in x ]  # list of (C, H, W)
-            if self.reconstruction_algorithm.lower() == 'fbp':
-                recon = [ iradon_torch(torch.transpose(sino.squeeze(0), 0, 1), circle=False, output_size=max(self.image_size), **kwargs).unsqueeze(0) for sino in batch_i_sinos ]  # list of (C, H, W)
-                recon = torch.stack(recon, dim=0)  # (n_sinos, C, H, W)
-                recon = torch.mean(recon, dim=0)  # (C, H, W)
-            else:
-                raise NotImplementedError(f'Reconstruction algorithm {self.reconstruction_algorithm} not implemented yet.')
-            out.append(recon)
-        out = torch.stack(out, dim=0)  # (B, C, H, W)
-        # reshape to (B, C, H, W)
-        out = out.view(-1, out.shape[1], out.shape[-2], out.shape[-1])
-        return out
+        n_splits = len(x)
+        batch_size = x[0].shape[0]
+        n_channels = x[0].shape[1]
+        x = torch.stack(x, dim=0) # (n_sinos, B, C, H, W)
+        # x = x.view(-1, x.shape[3], x.shape[4])  # (n_sinos*B*C, H, W)
+        x = x.view(n_splits * batch_size * n_channels, x.shape[3], x.shape[4])  # (n_sinos*B*C, H, W)
+
+        x_recon = iradon_torch(
+            torch.transpose(x, 1, 2), circle=False, output_size=max(self.image_size), **kwargs
+        )  # (n_sinos*B, C, H, W)
+
+        x_recon = x_recon.view(n_splits, batch_size, n_channels, x_recon.shape[1], x_recon.shape[2])  # (n_sinos, B, C, H, W)
+        x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
+        return x_recon
 
     def split_prompt(self, prompt, mode='multinomial'):
         """
