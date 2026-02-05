@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from noise2noise.data.data_loader import SinogramGenerator
-from noise2noise.model.unet_noise2noise import UNetNoise2Noise as UNet
-from noise2noise.model.unet_noise2noise import UnetNoise2NoiseCommons
+from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
+from noise2noise.model.unet_noise2noise import UnetNoise2NoisePETCommons
 
 from pytorcher.trainer import PytorchTrainer
 

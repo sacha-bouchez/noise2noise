@@ -9,7 +9,7 @@ from torch import nn
 import ast
 import mlflow
 
-class UNetNoise2Noise(UNet):
+class UNetNoise2NoisePET(UNet):
 
     """
     U-Net model for Noise2Noise.
@@ -25,7 +25,7 @@ class UNetNoise2Noise(UNet):
         #
         return output
 
-class UnetNoise2NoiseCommons:
+class UnetNoise2NoisePETCommons:
 
     """
     Common methods for UNet Noise2Noise models.
@@ -69,7 +69,7 @@ class UnetNoise2NoiseCommons:
             raise ValueError(f'Unknown split mode: {mode}')
         return splits
     
-class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoiseCommons, PytorchTrainer):
+class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrainer):
 
     """
     Inference U-Net model for Noise2Noise.
