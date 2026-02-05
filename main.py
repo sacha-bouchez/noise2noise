@@ -6,8 +6,7 @@ from train.trainer import Noise2NoiseTrainer
 
 if __name__ == "__main__":
 
-    unet_input_domain = 'photon'
-    unet_output_domain = 'photon'
+    supervised = False
 
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
@@ -34,6 +33,7 @@ if __name__ == "__main__":
             },
             unet_input_domain=unet_input_domain,
             unet_output_domain=unet_output_domain,
+            supervised=supervised,
             reconstruction_algorithm='fbp',
             reconstruction_config={'filter_name': 'ramp'},
             n_splits=2,

@@ -43,6 +43,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoiseCommons):
             },
             unet_input_domain='photon',
             unet_output_domain='photon',
+            supervised=False,
             reconstruction_algorithm='fbp',
             reconstruction_config={'filter_name': 'ramp'},
             n_splits=2,
@@ -59,7 +60,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoiseCommons):
         self.shuffle = shuffle
         self.simulator_config = simulator_config
         self.learning_rate = learning_rate
-
+        self.supervised = supervised
         # Validate task parameters
         assert unet_input_domain in ['photon', 'image'], "unet_input_domain must be either 'photon' or 'image'."
         assert unet_output_domain in ['photon', 'image'], "unet_output_domain must be either 'photon' or 'image'."
@@ -295,9 +296,14 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoiseCommons):
                 scale = scale.to(self.device).float()
 
                 # split prompt with multinomial statistics
-                splitted_prompts = self.split_prompt(prompt, mode='multinomial')
-                pairwise_permutations = list(itertools.permutations(range(self.n_splits), 2))
                 split_losses = []
+                if not self.supervised:
+                    splitted_prompts = self.split_prompt(prompt, mode='multinomial')
+                    pairwise_permutations = list(itertools.permutations(range(self.n_splits), 2))
+                else:
+                    # In supervised setting, we force n_splits = 1 and use the prompt as is with the ground truth as target
+                    splitted_prompts = [prompt]
+                    pairwise_permutations = [(0, 0)] # dummy pair
                 #
 
                 # Apply reconstruction if needed
@@ -311,7 +317,10 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoiseCommons):
                     x_i = x[i]
                     x_j = x[j]
                     # Inference and loss computation for pair (i, j)
-                    loss_ij = inference_pair_loss_metrics(x_i, x_j, target)
+                    if not self.supervised:
+                        loss_ij = inference_pair_loss_metrics(x_i, x_j, target)
+                    else:
+                        loss_ij = inference_pair_loss_metrics(x_i, target, target)
                     split_losses.append(loss_ij)
                 # global loss
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
