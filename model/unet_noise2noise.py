@@ -1,7 +1,7 @@
 from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils import iradon as iradon_torch
+from pytorcher.utils import deepinv_iradon as iradon
 
 import torch
 from torch import nn
@@ -36,16 +36,15 @@ class UnetNoise2NoisePETCommons:
             x = [ xx / scale[i] for i, xx in enumerate(x) ]  # list of (B, C, H, W)
         n_splits = len(x)
         batch_size = x[0].shape[0]
-        n_channels = x[0].shape[1]
         x = torch.stack(x, dim=0) # (n_sinos, B, C, H, W)
-        # x = x.view(-1, x.shape[3], x.shape[4])  # (n_sinos*B*C, H, W)
-        x = x.view(n_splits * batch_size * n_channels, x.shape[3], x.shape[4])  # (n_sinos*B*C, H, W)
+        #
+        x = x.view(n_splits * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (n_sinos*B, C, H, W)
 
-        x_recon = iradon_torch(
-            torch.transpose(x, 1, 2), circle=False, output_size=max(self.image_size), **kwargs
+        x_recon = iradon(
+            torch.transpose(x, -2, -1), circle=True, out_size=max(self.image_size), **kwargs
         )  # (n_sinos*B, C, H, W)
 
-        x_recon = x_recon.view(n_splits, batch_size, n_channels, x_recon.shape[1], x_recon.shape[2])  # (n_sinos, B, C, H, W)
+        x_recon = x_recon.view(n_splits, batch_size, x_recon.shape[1], x_recon.shape[2], x_recon.shape[3])  # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
 
