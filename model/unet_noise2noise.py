@@ -33,7 +33,7 @@ class UnetNoise2NoisePETCommons:
 
     def reconstruction(self, *x, scale=None, **kwargs):
         if scale is not None:
-            x = [ xx / scale.view(-1, 1, 1, 1) for xx in x ]  # list of (B, C, H, W)
+            x = [ xx / scale[i] for i, xx in enumerate(x) ]  # list of (B, C, H, W)
         n_splits = len(x)
         batch_size = x[0].shape[0]
         n_channels = x[0].shape[1]
