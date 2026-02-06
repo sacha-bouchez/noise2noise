@@ -9,6 +9,8 @@ from torch import nn
 import ast
 import mlflow
 
+from math import sqrt
+
 class UNetNoise2NoisePET(UNet):
 
     """
@@ -40,10 +42,16 @@ class UnetNoise2NoisePETCommons:
         #
         x = x.view(n_splits * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (n_sinos*B, C, H, W)
 
+        # Compute out_size base on scanner radius and voxel size to ensure that the reconstructed image fits within the circular FOV
+        out_size = int(self.scanner_radius * sqrt(2) / self.voxel_size_mm)
         x_recon = iradon(
-            torch.transpose(x, -2, -1), circle=True, out_size=max(self.image_size), **kwargs
+            torch.transpose(x, -2, -1), circle=True, out_size=out_size, **kwargs
         )  # (n_sinos*B, C, H, W)
-
+        # Crop to original image size
+        pad_x = (x_recon.shape[-2] - self.image_size[0]) // 2
+        pad_y = (x_recon.shape[-1] - self.image_size[1]) // 2
+        x_recon = x_recon[:, :, pad_x:x_recon.shape[-2]-pad_x, pad_y:x_recon.shape[-1]-pad_y] # (n_sinos*B, C, H, W)
+        #
         x_recon = x_recon.view(n_splits, batch_size, x_recon.shape[1], x_recon.shape[2], x_recon.shape[3])  # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
@@ -112,6 +120,8 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
         self.reconstruction_config = ast.literal_eval(params.get('reconstruction_config', '{}'))
         self.n_splits = int(params.get('n_splits', 2))
         self.image_size = ast.literal_eval(params.get('image_size', '(160, 160)'))
+        self.scanner_radius = int(params.get('scanner_radius', 300))
+        self.voxel_size_mm = float(params.get('voxel_size_mm', 2.0))
         print(f"Model parameters: input_domain={self.unet_input_domain}, output_domain={self.unet_output_domain}, reconstruction_algorithm={self.reconstruction_algorithm}, n_splits={self.n_splits}, image_size={self.image_size}")
 
     def forward(self, x, scale, seed=None, monte_carlo_steps=1, split=False):
