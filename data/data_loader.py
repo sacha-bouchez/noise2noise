@@ -163,23 +163,26 @@ class SinogramGenerator(Dataset):
         data_gth = read_castor_binary_file(f'{dest_path}/object/object.hdr')
         data_gth = torch.from_numpy(data_gth)
         #
-        return dest_path, data_prompt, data_nfpt, data_gth, scale_factor
+        data_att = read_castor_binary_file(f'{dest_path}/object/object_att.hdr')
+        data_att = torch.from_numpy(data_att)
+        #
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor
 
 
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        _, prompt, nfpt, gth, scale_factor = self.simulate_sinogram(idx)
+        _, prompt, nfpt, gth, att, scale_factor = self.simulate_sinogram(idx)
 
-        return prompt, nfpt, gth, scale_factor
+        return prompt, nfpt, gth, att, scale_factor
 
     def __getitem__(self, idx):
         """
         Output shape : (1, H, W)
         """
 
-        prompt, nfpt, gth, scale = self.generate_sample(idx)
-        return prompt, nfpt, gth, scale
+        prompt, nfpt, gth, att, scale = self.generate_sample(idx)
+        return prompt, nfpt, gth, att, scale
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
 
