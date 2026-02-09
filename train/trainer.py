@@ -45,6 +45,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
             },
             unet_input_domain='photon',
             unet_output_domain='photon',
+            physics='backward_radon',
             supervised=False,
             reconstruction_algorithm='fbp',
             reconstruction_config={'filter_name': 'ramp'},
@@ -84,8 +85,8 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
         self.reconstruction_algorithm = reconstruction_algorithm
         self.reconstruction_config = reconstruction_config
         self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
-
-        # 
+        #
+        self.physics = physics
         if self.unet_output_domain == self.unet_input_domain == 'image':
             assert objective_type.lower() in ['mse'], "When both input and output domain is 'image', only 'MSE' is supported."
         else:
@@ -140,9 +141,11 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
         )
         loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
         #
-        # These parameters may be used for inference reconstruction later on, so we store them as trainer attributes so that they can be accessed from mlflow.
+        # These parameters may be used for inference reconstruction or training backprojection later on, so we store them as trainer attributes so that they can be accessed from mlflow.
         self.scanner_radius = self.dataset_train.sinogram_simulator.scanner_radius
         self.voxel_size_mm = self.dataset_train.sinogram_simulator.voxel_size_mm
+        self.gaussian_PSF = self.dataset_train.sinogram_simulator.gaussian_PSF
+        self.n_angles = self.dataset_train.sinogram_simulator.n_angles
         #
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
         if 'acquisition_time' in self.simulator_config:
@@ -175,9 +178,19 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
             n_classes=1,
             bilinear=True,
             normalize_input=True,
+            input_domain=self.unet_input_domain,
+            output_domain=self.unet_output_domain,
+            physics=self.physics,
             **self.unet_config
         )
         model = model.to(self.device)
+        # Add usefull atrributes to model
+        # Geometry attributes for backprojection
+        model.n_angles = self.n_angles
+        model.scanner_radius = self.scanner_radius
+        model.voxel_size_mm = self.voxel_size_mm
+        model.gaussian_PSF = self.gaussian_PSF
+        #
         return model
 
     def get_objective(self):
@@ -260,17 +273,17 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
             sinogram = pet_forward_radon(
                 image=image,
                 attenuation_map=attenuation_map,
-                n_angles=self.dataset_train.sinogram_simulator.n_angles,
-                scanner_radius_mm=self.dataset_train.sinogram_simulator.scanner_radius,
-                gaussian_PSF_fwhm_mm=self.dataset_train.sinogram_simulator.gaussian_PSF,
-                voxel_size_mm=self.dataset_train.sinogram_simulator.voxel_size_mm,
+                n_angles=self.n_angles,
+                scanner_radius_mm=self.scanner_radius,
+                gaussian_PSF_fwhm_mm=self.gaussian_PSF,
+                voxel_size_mm=self.voxel_size_mm,
                 scale=scale
             )
         else:
             raise NotImplementedError("Currently only 'radon' forward operator is supported for photon to image domain conversion.")
         return sinogram
     
-    def compute_loss(self, output, target, attenuation_map=None):
+    def compute_loss(self, output, target, attenuation_map=None, scale=None):
 
         def compute_count_loss(output, target):
             """
@@ -300,7 +313,6 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                 print("Warning: No attenuation map provided for photon to image domain conversion. Assuming no attenuation for forward operator.")
             # Scale factor must be adapted to account for n_splits in noise2noise training. This is equivalent to simulating a new acquisition with acquisition_time / n_splits, which means the number of counts is divided by n_splits.
             base_scale = self.dataset_train.acquisition_time * np.log(2) / self.dataset_train.half_life
-            scale = base_scale / self.n_splits
             #
             projected_output = self.pet_forward_operator(
                 output,
@@ -317,10 +329,14 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
 
     def fit(self):
 
-        def inference_pair_loss_metrics(noisy_img_a, noisy_img_b, clean_img, attenuation_map=None):
+        def inference_pair_loss_metrics(noisy_img_a, noisy_img_b, clean_img, attenuation_map=None, scale=None):
             """ Perform inference with a as input and b as target, and compute loss """
-            output = self.model(noisy_img_a)
-            loss = self.compute_loss(output, noisy_img_b, attenuation_map=attenuation_map)
+            output = self.model(
+                noisy_img_a,
+                attenuation_map=attenuation_map,
+                scale=scale,
+            )
+            loss = self.compute_loss(output, noisy_img_b, attenuation_map=attenuation_map, scale=scale)
             # We only update n2n_ metrics and loss here
             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
             self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
@@ -379,9 +395,9 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                     x_j = x[j]
                     # Inference and loss computation for pair (i, j)
                     if not self.supervised:
-                        loss_ij = inference_pair_loss_metrics(x_i, x_j, target, attenuation_map=att)
+                        loss_ij = inference_pair_loss_metrics(x_i, x_j, target, attenuation_map=att, scale=scale)
                     else:
-                        loss_ij = inference_pair_loss_metrics(x_i, target, target, attenuation_map=att)
+                        loss_ij = inference_pair_loss_metrics(x_i, target, target, attenuation_map=att, scale=scale)
                     split_losses.append(loss_ij)
                 # global loss
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
@@ -438,7 +454,11 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                             splits = self.reconstruction(splits, scale=scale)
 
                         # Denoise
-                        splits_denoised = self.model(splits)
+                        splits_denoised = self.model(
+                            splits,
+                            attenuation_map=att.repeat(self.n_splits, 1, 1, 1), # repeat attenuation map accordingly
+                            scale=scale
+                        )
 
                         # Expand splits to have (n_splits, B, C, H, W)
                         splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)

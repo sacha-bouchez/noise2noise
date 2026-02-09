@@ -1,7 +1,7 @@
 from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils import deepinv_iradon as iradon
+from pytorcher.utils import deepinv_iradon as iradon, pet_forward_radon
 
 import torch
 from torch import nn
@@ -18,7 +18,43 @@ class UNetNoise2NoisePET(UNet):
     If outputs are in the photon/Poisson domain using 'mse_anscombe' loss, apply the rescale stage at inference time.
     """
 
-    def forward(self, x):
+    def __init__(self, *args, input_domain='image', output_domain='image', physics='backward_radon', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.input_domain = input_domain
+        self.output_domain = output_domain
+        assert physics in ['backward_radon'], "Currently only 'backward_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
+        self.physics = physics
+
+    def forward(self, x, attenuation_map=None, scale=None, physics_kwargs={}):
+        #
+        if self.input_domain == 'photon' and self.output_domain == 'image' and self.physics is not None and isinstance(self.output_size, tuple):
+            # Photon to image models need pre-inverse to map sinogram back to image domain.
+            # This ensures that skip connections are consistent.
+            if self.physics == 'backward_radon':
+                with torch.enable_grad():
+                    # Create dummy image to be projected.
+                    # The forward operator is linear, so the gradient will be the same regardless of the values in the dummy image.
+                    x0 = torch.zeros(x.shape[0], x.shape[1], self.output_size[0], self.output_size[1], device=x.device, requires_grad=True)  # (B, C, H, W)
+                    if attenuation_map is None:
+                        print("Warning: No attenuation map provided for pre-inverse. Assuming no attenuation.")
+                    if scale is None:
+                        print("Warning: No scale provided for pre-inverse. Assuming scale of 1. Results may need to be rescaled accordingly.")
+                    Ax0 = pet_forward_radon(
+                        x0,
+                        attenuation_map=attenuation_map,
+                        scale=scale,
+                        n_angles=self.n_angles if hasattr(self, 'n_angles') else physics_kwargs.get('n_angles', 300),
+                        scanner_radius_mm=self.scanner_radius if hasattr(self, 'scanner_radius') else physics_kwargs.get('scanner_radius_mm', 300),
+                        gaussian_PSF_fwhm_mm=self.gaussian_PSF if hasattr(self, 'gaussian_PSF') else physics_kwargs.get('gaussian_PSF_fwhm_mm', 4.0),
+                        voxel_size_mm=self.voxel_size_mm if hasattr(self, 'voxel_size_mm') else physics_kwargs.get('voxel_size_mm', 2.0)
+                        )  # (B, C, H, W)
+                    loss = (Ax0 * x).sum()
+                    loss.backward()
+                    x = x0.grad  # (B, C, H, W)
+            else:
+                raise ValueError(f"Physics model '{self.physics}' not recognized for UNetNoise2NoisePET.")
+        # NOTE if normalize_input is True, this is done in the UNet forward method, so we don't need to do it here again.
+        #
         output = super().forward(x)
         # Anscombe inverse transform to convert back to original Poisson scale
         if hasattr(self, 'loss_type') and self.loss_type == 'mse_anscombe' and not self.training:
@@ -181,3 +217,42 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
         # Average over monte carlo steps
         outputs = outputs / monte_carlo_steps # (B, C, H, W)
         return outputs
+    
+if __name__ == '__main__':
+
+    unet_noise2noise_pet = UNetNoise2NoisePET(
+        n_channels=1,
+        n_classes=1,
+        global_conv=32,
+        n_levels=4,
+        bilinear=True,
+        conv_layer_type='Conv2d',
+        residual=True,
+        normalize_input=True,
+        input_domain='photon',
+        output_domain='image',
+        physics='backward_radon',
+        output_size=(160, 160)
+    )
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    unet_noise2noise_pet.eval().to(device)
+
+    from tools.image.castor import read_castor_binary_file
+    import os
+
+    dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
+    sino = read_castor_binary_file(os.path.join(dest_path, 'simu', 'simu_pt.s.hdr'), reader='numpy')
+    sino = torch.from_numpy(sino).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
+    attenuation_map = read_castor_binary_file(os.path.join(dest_path, 'object', 'attenuat_brain_phantom.hdr'), reader='numpy')
+    attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
+
+    with torch.no_grad():
+        output = unet_noise2noise_pet(sino, attenuation_map=attenuation_map, scale=torch.tensor(0.02, device=device))
+        print(f"Output shape: {output.shape}")
+
+    from matplotlib import pyplot as plt
+
+    plt.imshow(output.cpu().squeeze(), cmap='gray_r')
+    plt.show()
