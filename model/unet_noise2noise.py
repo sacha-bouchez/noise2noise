@@ -2,6 +2,7 @@ from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
 from pytorcher.utils import deepinv_iradon as iradon, pet_forward_radon
+from noise2noise.utils.adjoint import backward_radon
 
 import torch
 from torch import nn
@@ -10,6 +11,7 @@ import ast
 import mlflow
 
 from math import sqrt
+from pytorcher.utils import tensor_hash
 
 class UNetNoise2NoisePET(UNet):
 
@@ -22,37 +24,50 @@ class UNetNoise2NoisePET(UNet):
         super().__init__(*args, **kwargs)
         self.input_domain = input_domain
         self.output_domain = output_domain
-        assert physics in ['backward_radon'], "Currently only 'backward_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
+        assert physics in [None, 'backward_radon'], "Currently only 'backward_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
         self.physics = physics
 
-    def forward(self, x, attenuation_map=None, scale=None, physics_kwargs={}):
+    def adjoint(self, y, attenuation_map=None, scale=None, physics_kwargs={}):
         #
-        if self.input_domain == 'photon' and self.output_domain == 'image' and self.physics is not None and isinstance(self.output_size, tuple):
+        if self.input_domain == 'photon' and self.output_domain == 'image' and \
+            self.physics is not None and isinstance(self.output_size, tuple): # Ensure that we only apply the pre-inverse when the output is an image and the input is a sinogram, and that the output size is specified (i.e. not 'same')
             # Photon to image models need pre-inverse to map sinogram back to image domain.
             # This ensures that skip connections are consistent.
             if self.physics == 'backward_radon':
                 with torch.enable_grad():
-                    # Create dummy image to be projected.
-                    # The forward operator is linear, so the gradient will be the same regardless of the values in the dummy image.
-                    x0 = torch.zeros(x.shape[0], x.shape[1], self.output_size[0], self.output_size[1], device=x.device, requires_grad=True)  # (B, C, H, W)
-                    if attenuation_map is None:
-                        print("Warning: No attenuation map provided for pre-inverse. Assuming no attenuation.")
-                    if scale is None:
-                        print("Warning: No scale provided for pre-inverse. Assuming scale of 1. Results may need to be rescaled accordingly.")
-                    Ax0 = pet_forward_radon(
-                        x0,
+                    At_y = backward_radon(
+                        y,
                         attenuation_map=attenuation_map,
                         scale=scale,
+                        image_size=self.output_size,
                         n_angles=self.n_angles if hasattr(self, 'n_angles') else physics_kwargs.get('n_angles', 300),
                         scanner_radius_mm=self.scanner_radius if hasattr(self, 'scanner_radius') else physics_kwargs.get('scanner_radius_mm', 300),
                         gaussian_PSF_fwhm_mm=self.gaussian_PSF if hasattr(self, 'gaussian_PSF') else physics_kwargs.get('gaussian_PSF_fwhm_mm', 4.0),
                         voxel_size_mm=self.voxel_size_mm if hasattr(self, 'voxel_size_mm') else physics_kwargs.get('voxel_size_mm', 2.0)
-                        )  # (B, C, H, W)
-                    loss = (Ax0 * x).sum()
-                    loss.backward()
-                    x = x0.grad  # (B, C, H, W)
+                    )
             else:
                 raise ValueError(f"Physics model '{self.physics}' not recognized for UNetNoise2NoisePET.")
+            #
+            return At_y
+        else:
+            # For other cases, the adjoint is just the identity function (i.e. no pre-inverse needed).
+            return y
+
+    def forward(self, x, x_domain=None, attenuation_map=None, scale=None, physics_kwargs={}):
+        """
+        :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
+                  Even if input_domain is 'photon', one can provide a pre-computed adjoint image as input to save time during inference and training.
+        :param x_domain: 'photon' or 'image', only needed if the domain of x is different from self.input_domain and we need to apply the adjoint operator. If None, it will be inferred from the shape of x and self.input_domain.
+        :param attenuation_map: (B, C, H, W) attenuation map to be used for the adjoint operator. If None, no attenuation will be applied.
+        :param scale: (B,) scale factor to be applied to sinogram before reconstruction. This is typically acquisition_time * np.log(2) / half_life, but can be set to 1 if the input sinogram has already been scaled accordingly. If None, no scaling will be applied.
+        :param physics_kwargs: additional keyword arguments to be passed to the physics model during the adjoint operation, such as n_angles, scanner_radius_mm, gaussian_PSF_fwhm_mm, voxel_size_mm, etc. These will override the default values set in the model parameters if provided.
+        """
+        #
+        if x_domain is None:
+            x_domain = self.input_domain
+        if x_domain == self.input_domain:
+            # Need to apply adjoint to map to the correct domain for the UNet
+            x = self.adjoint(x, attenuation_map=attenuation_map, scale=scale, physics_kwargs=physics_kwargs)
         # NOTE if normalize_input is True, this is done in the UNet forward method, so we don't need to do it here again.
         #
         output = super().forward(x)
@@ -92,24 +107,61 @@ class UnetNoise2NoisePETCommons:
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
 
-    def split_prompt(self, prompt, mode='multinomial'):
+
+    def split_prompt(self, prompt, mode='multinomial', consistent=True, seed=None):
         """
         Split prompt sinogram into n_splits sinograms with multinomial statistics.
-        
-        :param prompt: (B, C, H, W) sinogram tensor
-        :return: list of n_splits sinogram tensors, each of shape (B, C, H, W)
+
+        :param prompt: (B, C, H, W) sinogram batch (non-negative integer counts)
+        :param consistent: if True, each sample gets its own deterministic seed
+        :param seed: global seed used only when consistent=False
+        :return: list of n_splits tensors, each (B, C, H, W)
         """
-        if mode == 'multinomial':
-            splits = []
-            remaining = prompt
-            for i in range(self.n_splits - 1):
-                split_i = torch.distributions.Binomial(total_count=remaining, probs=1/(self.n_splits - i)).sample()
-                splits.append(split_i)
-                remaining = remaining - split_i
-            # Final split gets the remaining counts
-            splits.append(remaining)
-        else:
+        B = prompt.shape[0]
+        device = prompt.device
+
+        if mode != 'multinomial':
             raise ValueError(f'Unknown split mode: {mode}')
+
+        # Create per-sample generators
+        generators = []
+
+        if consistent:
+            # Deterministic seed per sample based on its content
+            for b in range(B):
+                g = torch.Generator(device=device)
+                s = tensor_hash(prompt[b], format='int') % (2**63 - 1)
+                g.manual_seed(s)
+                generators.append(g)
+        else:
+            # One shared generator (e.g. inference-time reproducibility)
+            g = torch.Generator(device=device)
+            if seed is not None:
+                g.manual_seed(seed)
+            generators = [g] * B
+
+        # Multinomial splitting via sequential binomials
+        remaining = prompt.clone()
+        splits = []
+
+        for i in range(self.n_splits - 1):
+            p = 1.0 / (self.n_splits - i)
+
+            split_i = torch.empty_like(prompt)
+
+            # We loop over batch for RNG correctness, but each draw is fully vectorized over (C,H,W)
+            for b in range(B):
+                split_i[b] = torch.binomial(
+                    count=remaining[b],
+                    prob=torch.full_like(remaining[b], p, dtype=torch.float32),
+                    generator=generators[b]
+                )
+
+            splits.append(split_i)
+            remaining = remaining - split_i
+
+        splits.append(remaining)  # last split gets leftovers
+
         return splits
     
 class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrainer):
@@ -184,7 +236,7 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
                 print(f"Monte Carlo step {i+1}/{monte_carlo_steps}")
             # Split input sinogram
             if split:
-                splits = self.split_prompt(x, mode='multinomial')  # list of (B, C, H, W)
+                splits = self.split_prompt(x, mode='multinomial', consistent=False)  # list of (B, C, H, W)
             else:
                 splits = [x]
 

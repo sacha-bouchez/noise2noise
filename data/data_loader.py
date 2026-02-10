@@ -172,17 +172,17 @@ class SinogramGenerator(Dataset):
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        _, prompt, nfpt, gth, att, scale_factor = self.simulate_sinogram(idx)
+        dest_path, prompt, nfpt, gth, att, scale_factor = self.simulate_sinogram(idx)
 
-        return prompt, nfpt, gth, att, scale_factor
+        return dest_path, prompt, nfpt, gth, att, scale_factor
 
     def __getitem__(self, idx):
         """
         Output shape : (1, H, W)
         """
 
-        prompt, nfpt, gth, att, scale = self.generate_sample(idx)
-        return prompt, nfpt, gth, att, scale
+        dest_path, prompt, nfpt, gth, att, scale = self.generate_sample(idx)
+        return dest_path, prompt, nfpt, gth, att, scale
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
 
@@ -224,7 +224,7 @@ if __name__ == '__main__':
     dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42, scanner_radius=400)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    for i, (prompt, nfpt, gth) in enumerate(loader):
+    for i, (dest_path, prompt, nfpt, gth, att, scale) in enumerate(loader):
         pass
 
     fig, ax = plt.subplots(1,3, figsize=(12,4))

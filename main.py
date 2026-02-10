@@ -6,16 +6,17 @@ from train.trainer import Noise2NoiseTrainer
 
 if __name__ == "__main__":
 
+    unet_input_domain = 'photon'
+    unet_output_domain = 'image'
     supervised = False
 
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
             dataset_train_size=2048,
-            dataset_val_size=512,
+            dataset_val_size=256,
             val_freq=1,
             n_epochs=25,
             batch_size=4,
-            metrics_configs=[],
             shuffle=True,
             simulator_config={
                 'image_size' : (160,160),
@@ -27,9 +28,10 @@ if __name__ == "__main__":
             },
             learning_rate=1e-3,
             unet_config = {
-                'conv_layer_type': 'SinogramConv2d',
+                'conv_layer_type': 'Conv2d',
                 'n_levels': 4,
                 'global_conv': 32,
+                'residual': True
             },
             unet_input_domain=unet_input_domain,
             unet_output_domain=unet_output_domain,
@@ -37,7 +39,7 @@ if __name__ == "__main__":
             reconstruction_algorithm='fbp',
             reconstruction_config={'filter_name': 'ramp'},
             n_splits=2,
-            num_workers=10,
+            num_workers=1,
             objective_type='poisson',
             seed=42
     )
@@ -81,6 +83,7 @@ if __name__ == "__main__":
         # resume model and optimizer if possible
         trainer.load_model_and_optimizer(artifact_path="reboot_model")
         #
-        torchsummary.summary(trainer.model, input_size=(1, trainer.image_size[0], trainer.image_size[1]))
+        sample = trainer.dataset_train[0][1] # get prompt sinogram sample for input shape
+        torchsummary.summary(trainer.model, input_size=(sample.shape[0], sample.shape[1], sample.shape[2]))
         # start training
         trainer.fit()
