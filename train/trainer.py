@@ -84,11 +84,15 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
         self.unet_input_domain = unet_input_domain
         self.unet_output_domain = unet_output_domain
         self.model_name = f'Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}'
+        if self.supervised:
+            self.model_name += '_supervised'
+        else:
+            self.model_name += '_N2N'
         self.reconstruction_algorithm = reconstruction_algorithm
         self.reconstruction_config = reconstruction_config
         self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
         #
-        if (self.unet_output_domain == self.unet_input_domain == 'image') or (supervised and unet_output_domain == 'image'):
+        if (self.unet_output_domain == self.unet_input_domain == 'image') or (self.supervised and unet_output_domain == 'image'):
             assert objective_type.lower() in ['mse'], "When both input and output domain is 'image', only 'MSE' is supported."
         else:
             assert objective_type.lower() in ['poisson', 'mse', 'mse_anscombe'], "When output domain is 'photon', only 'Poisson' and 'MSE' are supported."
@@ -473,6 +477,12 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                 # Compute adjoints if    needed for physics-informed training
                 if self.physics is not None:
                     adjoints = self.get_cached_adjoint(x, path, att, scale)
+                    # adjoints = [self.model.adjoint(x_, attenuation_map=att, scale=scale) for x_ in x]
+
+                if self.unet_output_domain == 'photon' and not self.supervised:
+                    target = target / self.n_splits # In photon domain, we divide poisson parameter accordingly
+                else:
+                    target = target
 
                 # Denoise and compute loss on all pairs
                 for (i, j) in pairwise_permutations:
@@ -561,7 +571,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                         else:
                             splits_infered = torch.chunk(splits_infered, self.n_splits, dim=0)  # list of (B, C, H, W)
                         #
-                        if self.unet_output_domain == 'photon':
+                        if self.unet_output_domain == 'photon' and not self.supervised:
                             target = target / self.n_splits # In photon domain, we divide poisson parameter accordingly
                         else:
                             target = target
