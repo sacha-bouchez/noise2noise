@@ -524,10 +524,6 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                 with torch.no_grad():
                     for batch_idx, (path, prompt, nfpt, gth, att, scale) in enumerate(self.loader_val):
 
-                        # Set seed for given batch for reproducibility
-                        torch.manual_seed(self.seed + batch_idx)
-                        torch.cuda.manual_seed_all(self.seed + batch_idx)
-
                         # set target for task
                         if self.unet_output_domain == 'image':
                             target = gth

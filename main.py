@@ -85,5 +85,9 @@ if __name__ == "__main__":
         #
         sample = trainer.dataset_train[0][1] # get prompt sinogram sample for input shape
         torchsummary.summary(trainer.model, input_size=(sample.shape[0], sample.shape[1], sample.shape[2]))
+        #
+        # fix torch seed for reproducibility
+        torch.manual_seed(trainer.seed)
+        torch.cuda.manual_seed_all(trainer.seed)
         # start training
         trainer.fit()
