@@ -67,6 +67,7 @@ class SinogramGenerator(Dataset):
             scatter_component=scatter_component,
             random_component=random_component,
             gaussian_PSF=gaussian_PSF,
+            half_life=half_life,
             seed=seed
         )
 
