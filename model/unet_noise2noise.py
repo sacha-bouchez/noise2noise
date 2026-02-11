@@ -1,8 +1,8 @@
 from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils import deepinv_iradon as iradon, pet_forward_radon
-from noise2noise.utils.adjoint import backward_radon
+from pytorcher.utils import PetForwardRadon, deepinv_iradon as iradon
+from noise2noise.utils.adjoint import backward_pet_radon
 
 import torch
 from torch import nn
@@ -20,30 +20,61 @@ class UNetNoise2NoisePET(UNet):
     If outputs are in the photon/Poisson domain using 'mse_anscombe' loss, apply the rescale stage at inference time.
     """
 
-    def __init__(self, *args, input_domain='image', output_domain='image', physics='backward_radon', **kwargs):
+    def __init__(self, *args,
+                 input_domain='image', output_domain='image',
+                 physics='backward_pet_radon', 
+                 sinogram_size=(300, 300),
+                 geometry={},
+                 image_size=(160,160), **kwargs):
         super().__init__(*args, **kwargs)
         self.input_domain = input_domain
         self.output_domain = output_domain
-        assert physics in [None, 'backward_radon'], "Currently only 'backward_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
+        assert physics in [None, 'backward_pet_radon'], "Currently only 'backward_pet_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
         self.physics = physics
+        if self.input_domain == 'image' and self.output_domain == 'image':
+            self.image_size = image_size
+            self.sinogram_size = None
+        elif self.input_domain == 'photon' and self.output_domain == 'photon':
+            self.sinogram_size = sinogram_size
+            self.image_size = None
+        elif self.input_domain == 'photon' and self.output_domain == 'image':
+            self.sinogram_size = sinogram_size
+            self.image_size = image_size
+        else:
+            raise ValueError(f"Unsupported domain combination: input_domain={input_domain}, output_domain={output_domain}. Supported combinations are: photon to image, image to image, photon to photon.")
+        #
+        self.n_angles = geometry.get('n_angles', 300)
+        self.scanner_radius = geometry.get('scanner_radius_mm', 300)
+        self.gaussian_PSF = geometry.get('gaussian_PSF_fwhm_mm', 4.0)
+        self.voxel_size_mm = geometry.get('voxel_size_mm', 2.0)
+        #
+        self.get_pet_forward_operator()
 
-    def adjoint(self, y, attenuation_map=None, scale=None, physics_kwargs={}):
+    def get_pet_forward_operator(self):
+        if self.physics == 'backward_pet_radon':
+            self.forward_pet_radon_operator = PetForwardRadon(
+                n_angles=self.n_angles ,
+                scanner_radius_mm=self.scanner_radius,
+                gaussian_PSF_fwhm_mm=self.gaussian_PSF,
+                voxel_size_mm=self.voxel_size_mm
+            )
+        else:
+            self.forward_pet_radon_operator = None
+
+    def adjoint(self, y, attenuation_map=None, scale=None):
         #
         if self.input_domain == 'photon' and self.output_domain == 'image' and \
-            self.physics is not None and isinstance(self.output_size, tuple): # Ensure that we only apply the pre-inverse when the output is an image and the input is a sinogram, and that the output size is specified (i.e. not 'same')
+            self.physics is not None and isinstance(self.image_size, tuple): # Ensure that we only apply the pre-inverse when the output is an image and the input is a sinogram, and that the output size is specified (i.e. not 'same')
             # Photon to image models need pre-inverse to map sinogram back to image domain.
             # This ensures that skip connections are consistent.
-            if self.physics == 'backward_radon':
+            if self.physics == 'backward_pet_radon':
                 with torch.enable_grad():
-                    At_y = backward_radon(
+                    At_y = backward_pet_radon(
                         y,
                         attenuation_map=attenuation_map,
                         scale=scale,
-                        image_size=self.output_size,
-                        n_angles=self.n_angles if hasattr(self, 'n_angles') else physics_kwargs.get('n_angles', 300),
-                        scanner_radius_mm=self.scanner_radius if hasattr(self, 'scanner_radius') else physics_kwargs.get('scanner_radius_mm', 300),
-                        gaussian_PSF_fwhm_mm=self.gaussian_PSF if hasattr(self, 'gaussian_PSF') else physics_kwargs.get('gaussian_PSF_fwhm_mm', 4.0),
-                        voxel_size_mm=self.voxel_size_mm if hasattr(self, 'voxel_size_mm') else physics_kwargs.get('voxel_size_mm', 2.0)
+                        image_size=self.image_size,
+                        forward_pet_radon_operator=self.forward_pet_radon_operator
                     )
             else:
                 raise ValueError(f"Physics model '{self.physics}' not recognized for UNetNoise2NoisePET.")
@@ -53,21 +84,20 @@ class UNetNoise2NoisePET(UNet):
             # For other cases, the adjoint is just the identity function (i.e. no pre-inverse needed).
             return y
 
-    def forward(self, x, x_domain=None, attenuation_map=None, scale=None, physics_kwargs={}):
+    def forward(self, x, attenuation_map=None, scale=None):
         """
         :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
                   Even if input_domain is 'photon', one can provide a pre-computed adjoint image as input to save time during inference and training.
         :param x_domain: 'photon' or 'image', only needed if the domain of x is different from self.input_domain and we need to apply the adjoint operator. If None, it will be inferred from the shape of x and self.input_domain.
         :param attenuation_map: (B, C, H, W) attenuation map to be used for the adjoint operator. If None, no attenuation will be applied.
         :param scale: (B,) scale factor to be applied to sinogram before reconstruction. This is typically acquisition_time * np.log(2) / half_life, but can be set to 1 if the input sinogram has already been scaled accordingly. If None, no scaling will be applied.
-        :param physics_kwargs: additional keyword arguments to be passed to the physics model during the adjoint operation, such as n_angles, scanner_radius_mm, gaussian_PSF_fwhm_mm, voxel_size_mm, etc. These will override the default values set in the model parameters if provided.
         """
         #
-        if x_domain is None:
-            x_domain = self.input_domain
-        if x_domain == self.input_domain:
-            # Need to apply adjoint to map to the correct domain for the UNet
-            x = self.adjoint(x, attenuation_map=attenuation_map, scale=scale, physics_kwargs=physics_kwargs)
+        if self.input_domain == 'photon' and self.output_domain == 'image' and \
+            self.physics is not None and isinstance(self.image_size, tuple) and \
+            (x.shape[-2], x.shape[-1]) == self.sinogram_size: 
+                # Ensure that we only apply the pre-inverse when the input is a sinogram
+                x = self.adjoint(x, attenuation_map=attenuation_map, scale=scale)
         # NOTE if normalize_input is True, this is done in the UNet forward method, so we don't need to do it here again.
         #
         output = super().forward(x)
@@ -205,7 +235,7 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
         self.unet_input_domain = params.get('unet_input_domain', 'image')
         self.unet_output_domain = params.get('unet_output_domain', 'image')
         self.reconstruction_algorithm = params.get('reconstruction_algorithm', 'fbp')
-        self.reconstruction_config = ast.literal_eval(params.get('reconstruction_config', '{}'))
+        self.reconstruction_config = {'filter': True} # For now, we hardcode the reconstruction config to ensure that the pre-inverse and post-inverse are consistent. Future versions may include more flexible handling of reconstruction configs.
         self.n_splits = int(params.get('n_splits', 2))
         self.image_size = ast.literal_eval(params.get('image_size', '(160, 160)'))
         self.scanner_radius = int(params.get('scanner_radius', 300))
@@ -283,8 +313,8 @@ if __name__ == '__main__':
         normalize_input=True,
         input_domain='photon',
         output_domain='image',
-        physics='backward_radon',
-        output_size=(160, 160)
+        physics='backward_pet_radon',
+        image_size=(160, 160)
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

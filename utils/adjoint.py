@@ -1,18 +1,15 @@
 import torch
-from pytorcher.utils.forward import pet_forward_radon
+from pytorcher.utils.forward import PetForwardRadon
 
-def backward_radon(
+def backward_pet_radon(
           y,
           attenuation_map=None,
           scale=None,
           image_size=(160, 160),
-          n_angles=300,
-          scanner_radius_mm=300,
-          gaussian_PSF_fwhm_mm=4.0,
-          voxel_size_mm=2.0
+          forward_pet_radon_operator=None
 ):
     """
-    Docstring for backward_radon
+    Docstring for backward_pet_radon
     
     :param y: Sinogram tensor of shape (B, C, H, W) to be backprojected.
     :param attenuation_map: (B, C, H, W) attenuation map to be used for the adjoint operator. If None, no attenuation will be applied.
@@ -23,6 +20,7 @@ def backward_radon(
     :param gaussian_PSF_fwhm_mm: Full width at half maximum of the Gaussian point spread function in millimeters.
     :param voxel_size_mm: Size of the image voxels in millimeters.
     """
+    assert isinstance(forward_pet_radon_operator, PetForwardRadon), f"PetForwardRadon forward operator must be given, not {type(forward_pet_radon_operator)}."
     with torch.enable_grad():
         # Create dummy image to be projected.
         # The forward operator is linear, so the gradient will be the same regardless of the values in the dummy image.
@@ -31,14 +29,10 @@ def backward_radon(
             print("Warning: No attenuation map provided for pre-inverse. Assuming no attenuation.")
         if scale is None:
             print("Warning: No scale provided for pre-inverse. Assuming scale of 1. Results may need to be rescaled accordingly.")
-        Ax0 = pet_forward_radon(
+        Ax0 = forward_pet_radon_operator.forward(
             x0,
             attenuation_map=attenuation_map,
-            scale=scale,
-            n_angles=n_angles,
-            scanner_radius_mm=scanner_radius_mm,
-            gaussian_PSF_fwhm_mm=gaussian_PSF_fwhm_mm,
-            voxel_size_mm=voxel_size_mm
+            scale=scale
             )  # (B, C, H, W)
         loss = (Ax0 * y).sum()
         loss.backward()
