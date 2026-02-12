@@ -1,7 +1,7 @@
 from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils import PetForwardRadon, deepinv_iradon as iradon
+from pytorcher.utils import PetForwardRadon, FBPReconstructor
 from noise2noise.utils.adjoint import backward_pet_radon
 
 import torch
@@ -25,7 +25,11 @@ class UNetNoise2NoisePET(UNet):
                  physics='backward_pet_radon', 
                  sinogram_size=(300, 300),
                  geometry={},
-                 image_size=(160,160), **kwargs):
+                 reconstruction_type='fbp',
+                 reconstruction_config={},
+                 image_size=(160,160),
+                 n_splits=2,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.input_domain = input_domain
         self.output_domain = output_domain
@@ -40,6 +44,7 @@ class UNetNoise2NoisePET(UNet):
         elif self.input_domain == 'photon' and self.output_domain == 'image':
             self.sinogram_size = sinogram_size
             self.image_size = image_size
+            self.get_pet_forward_operator()
         else:
             raise ValueError(f"Unsupported domain combination: input_domain={input_domain}, output_domain={output_domain}. Supported combinations are: photon to image, image to image, photon to photon.")
         #
@@ -48,7 +53,21 @@ class UNetNoise2NoisePET(UNet):
         self.gaussian_PSF = geometry.get('gaussian_PSF_fwhm_mm', 4.0)
         self.voxel_size_mm = geometry.get('voxel_size_mm', 2.0)
         #
-        self.get_pet_forward_operator()
+        self.n_splits = n_splits
+        assert reconstruction_type.lower() in ['fbp'], "Currently only FBP is supported."
+        self.get_reconstruction_operator(reconstruction_type, reconstruction_config)
+
+    def get_reconstruction_operator(self, reconstruction_type, reconstruction_config):
+        if reconstruction_type.lower() == 'fbp':
+            self.reconstruction_operator = FBPReconstructor(
+                n_angles=self.n_angles,
+                scanner_radius_mm=self.scanner_radius,
+                voxel_size_mm=self.voxel_size_mm,
+                image_size=self.image_size,
+                **reconstruction_config
+            )
+        else:
+            raise ValueError(f"{reconstruction_type} reconstruction type is not allowed.")
 
     def get_pet_forward_operator(self):
         if self.physics == 'backward_pet_radon':
@@ -108,11 +127,11 @@ class UNetNoise2NoisePET(UNet):
         #
         return output
 
-class UnetNoise2NoisePETCommons:
+# class UnetNoise2NoisePETCommons:
 
-    """
-    Common methods for UNet Noise2Noise models.
-    """
+#     """
+#     Common methods for UNet Noise2Noise models.
+#     """
 
     def reconstruction(self, *x, scale=None, **kwargs):
         if scale is not None:
@@ -124,14 +143,7 @@ class UnetNoise2NoisePETCommons:
         x = x.view(n_splits * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (n_sinos*B, C, H, W)
 
         # Compute out_size base on scanner radius and voxel size to ensure that the reconstructed image fits within the circular FOV
-        out_size = int(self.scanner_radius * sqrt(2) / self.voxel_size_mm)
-        x_recon = iradon(
-            torch.transpose(x, -2, -1), circle=True, out_size=out_size, **kwargs
-        )  # (n_sinos*B, C, H, W)
-        # Crop to original image size
-        pad_x = (x_recon.shape[-2] - self.image_size[0]) // 2
-        pad_y = (x_recon.shape[-1] - self.image_size[1]) // 2
-        x_recon = x_recon[:, :, pad_x:x_recon.shape[-2]-pad_x, pad_y:x_recon.shape[-1]-pad_y] # (n_sinos*B, C, H, W)
+        x_recon = self.reconstruction_operator.forward(torch.transpose(x, -2, -1))  # (n_sinos*B, C, H, W)
         #
         x_recon = x_recon.view(n_splits, batch_size, x_recon.shape[1], x_recon.shape[2], x_recon.shape[3])  # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
@@ -194,7 +206,7 @@ class UnetNoise2NoisePETCommons:
 
         return splits
     
-class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrainer):
+class InferenceUNetNoise2Noise(UNet, PytorchTrainer):
 
     """
     Inference U-Net model for Noise2Noise.

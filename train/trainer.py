@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 
 from noise2noise.data.data_loader import SinogramGenerator
 from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
-from noise2noise.model.unet_noise2noise import UnetNoise2NoisePETCommons
 
 from pytorcher.trainer import PytorchTrainer
 from pytorcher.utils import normalize_batch, PetForwardRadon, tensor_hash
@@ -17,7 +16,7 @@ from pytorcher.utils import normalize_batch, PetForwardRadon, tensor_hash
 def anscombe(x):
     return 2 * torch.sqrt( x + (3/8) )
 
-class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
+class Noise2NoiseTrainer(PytorchTrainer):
 
     def __init__(
             self,
@@ -47,8 +46,8 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
             unet_output_domain='photon',
             physics='backward_pet_radon',
             supervised=False,
-            reconstruction_algorithm='fbp',
-            reconstruction_config={'filter_name': 'ramp'},
+            reconstruction_type='fbp',
+            reconstruction_config={},
             measurement_consistency_balance=0.0,
             n_splits=2,
             num_workers=10,
@@ -74,7 +73,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
         if unet_input_domain != unet_output_domain:
             assert unet_input_domain == 'photon' and unet_output_domain == 'image', "Only photon to image domain conversion is supported."
         if unet_input_domain == 'image':
-            assert reconstruction_algorithm is not None and reconstruction_algorithm in ['fbp'], "Currently only 'fbp' reconstruction is supported."
+            assert reconstruction_type is not None and reconstruction_type in ['fbp'], "Currently only 'fbp' reconstruction is supported."
         assert n_splits > 1, "n_splits must be greater than 1 for noise2noise training."
         if unet_input_domain == 'photon' and unet_output_domain == 'image':
             self.physics = physics
@@ -88,9 +87,11 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
             self.model_name += '_supervised'
         else:
             self.model_name += '_N2N'
-        self.reconstruction_algorithm = reconstruction_algorithm
+        self.reconstruction_type = reconstruction_type
+        unet_config.update({'reconstruction_type': self.reconstruction_type})
         self.reconstruction_config = reconstruction_config
         self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
+        unet_config.update({'n_splits': n_splits})
         #
         if (self.unet_output_domain == self.unet_input_domain == 'image') or (self.supervised and unet_output_domain == 'image'):
             assert objective_type.lower() in ['mse'], "When both input and output domain is 'image', only 'MSE' is supported."
@@ -158,7 +159,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
         self.gaussian_PSF = self.dataset_train.sinogram_simulator.gaussian_PSF
         self.n_angles = self.dataset_train.sinogram_simulator.n_angles
         #
-        self.sinogram_size = self.dataset_train[0][1].shape[-2:] # (H, W) of the sinogram, needed for UNet input size
+        self.sinogram_size = tuple(self.dataset_train[0][1].shape[-2:]) # (H, W) of the sinogram, needed for UNet input size
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
         if 'acquisition_time' in self.simulator_config:
             self.simulator_config.pop('acquisition_time') # ensure acquisition time is same as training set
@@ -259,13 +260,13 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                     scale = scale.to(self.device).float()
 
                     # reconstruction from noise-free sinogram
-                    recon_nfpt = self.reconstruction(nfpt, scale=scale)
+                    recon_nfpt = self.model.reconstruction(nfpt, scale=scale)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'nfpt' in m.name ]
                     self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
 
                     # reconstruction from prompt sinogram
-                    recon_prompt = self.reconstruction(prompt, scale=scale)
+                    recon_prompt = self.model.reconstruction(prompt, scale=scale)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'prompt' in m.name ]
                     self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
@@ -460,7 +461,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                 # split prompt with multinomial statistics
                 split_losses = []
                 if not self.supervised:
-                    splitted_prompts = self.split_prompt(prompt, mode='multinomial')
+                    splitted_prompts = self.model.split_prompt(prompt, mode='multinomial')
                     pairwise_permutations = list(itertools.permutations(range(self.n_splits), 2))
                     scale = scale / self.n_splits
                 else:
@@ -470,7 +471,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                 #
                 # Apply reconstruction if needed
                 if self.unet_input_domain == 'image':
-                    x = [self.reconstruction(s, scale=scale) for s in splitted_prompts]
+                    x = [self.model.reconstruction(s, scale=scale) for s in splitted_prompts]
                 else:
                     x = splitted_prompts
 
@@ -533,12 +534,13 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
                         # move data to device
                         prompt = prompt.to(self.device).float()
                         target = target.to(self.device).float()
+                        gth = gth.to(self.device).float()
                         scale = scale.to(self.device).float()
                         att = att.to(self.device).float()
 
                         if not self.supervised:
                             # Split data with multinomial statistics. This is done to match training data distribution
-                            x = self.split_prompt(prompt, mode='multinomial')
+                            x = self.model.split_prompt(prompt, mode='multinomial')
                             #
                             scale = scale / self.n_splits
                         else:
@@ -546,7 +548,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
 
                         # Apply reconstruction if needed
                         if self.unet_input_domain == 'image':
-                            x = [self.reconstruction(s, scale=scale) for s in x]
+                            x = [self.model.reconstruction(s, scale=scale) for s in x]
                         
 
                         # Compute adjoints if needed for physics-informed training
@@ -592,7 +594,7 @@ class Noise2NoiseTrainer(PytorchTrainer, UnetNoise2NoisePETCommons):
 
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
-                            output = self.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
+                            output = self.model.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
                         else:
                             splits_infered = torch.stack(splits_infered, dim=0)  # (n_splits, B, C, H, W)
                             output = torch.mean(splits_infered, dim=0)  # (B, C, H, W)
