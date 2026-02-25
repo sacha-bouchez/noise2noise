@@ -350,70 +350,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
         #
         return loss
 
-    def get_cached_adjoint(self, x, path, att, scale):
-        """
-        Get cached adjoint for given input tensor x. If not cached, compute and cache it.
-        Caching will be efficient if split_prompt was called with consistent=True, which ensures that the same input tensor will be generated for a given path across epochs.
-
-        :param x: list of tensors, each (B, C, H, W)  ← splits
-        :param path: list[str] length B
-        :param att: (B, 1, H, W) or compatible
-        :param scale: (B, 1, 1, 1) or compatible
-        :return: list of adjoint tensors matching x
-        """
-
-        device = x[0].device
-        adjoints = []
-
-        for s in x:  # loop over splits (usually small, like 2–8)
-            B = s.shape[0]
-
-            cache_paths = []
-            hashes = []
-
-            # Build cache paths
-            for i in range(B):
-                h = tensor_hash(s[i] + scale[i])
-                hashes.append(h)
-                cache_paths.append(
-                    os.path.join(path[i], f'adjoint/adjoint_{h}.pt')
-                )
-
-            # Determine which need computation
-            to_compute_idx = []
-            adj_s = [None] * B
-
-            for i, pth in enumerate(cache_paths):
-                if os.path.exists(pth):
-                    adj_s[i] = torch.load(pth, map_location=device)
-                else:
-                    to_compute_idx.append(i)
-
-            # Batch compute missing adjoints
-            if len(to_compute_idx) > 0:
-                s_batch = torch.stack([s[i] for i in to_compute_idx], dim=0)
-                att_batch = torch.stack([att[i] for i in to_compute_idx], dim=0)
-                scale_batch = torch.stack([scale[i] for i in to_compute_idx], dim=0)
-
-                adj_batch = self.model.adjoint(
-                    s_batch,
-                    attenuation_map=att_batch,
-                    scale=scale_batch
-                )
-
-                # Save and place back in order
-                for k, i in enumerate(to_compute_idx):
-                    adj_i = adj_batch[k:k+1]  # keep batch dim
-                    os.makedirs(os.path.dirname(cache_paths[i]), exist_ok=True)
-                    torch.save(adj_i.cpu(), cache_paths[i])
-                    adj_s[i] = adj_i.to(device)
-
-            # Concatenate back to (B, C, H, W)
-            adj_s = torch.cat(adj_s, dim=0)
-            adjoints.append(adj_s)
-
-        return adjoints
-
     def fit(self):
 
         def inference_pair_loss_metrics(noisy_img_a, noisy_img_b, clean_img, attenuation_map=None, scale=None):
@@ -476,11 +412,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 else:
                     x = splitted_prompts
 
-                # Compute adjoints if    needed for physics-informed training
-                if self.physics is not None:
-                    adjoints = self.get_cached_adjoint(x, path, att, scale)
-                    # adjoints = [self.model.adjoint(x_, attenuation_map=att, scale=scale) for x_ in x]
-
                 if self.unet_output_domain == 'photon' and not self.supervised:
                     target = target / self.n_splits # In photon domain, we divide poisson parameter accordingly
                 else:
@@ -488,17 +419,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 # Denoise and compute loss on all pairs
                 for (i, j) in pairwise_permutations:
-                    if self.unet_input_domain == 'photon' and self.unet_output_domain == 'image' and self.physics is not None:
-                        x_i = adjoints[i] # we use adjoint as input for inference and loss computation in physics-informed training
-                    else:
-                        x_i = x[i]
-                    x_no_adjoint_i = x[i]
+                    x_i = x[i]
                     x_j = x[j]
                     # Inference and loss computation for pair (i, j)
-                    if not self.supervised:
-                        loss_ij = inference_pair_loss_metrics(x_i, x_j, target, attenuation_map=att, scale=scale)
-                    else:
-                        loss_ij = inference_pair_loss_metrics(x_i, x_no_adjoint_i, target, attenuation_map=att, scale=scale)
+                    loss_ij = inference_pair_loss_metrics(x_i, x_j, target, attenuation_map=att, scale=scale)
                     split_losses.append(loss_ij)
                 # global loss
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
@@ -550,24 +474,22 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         # Apply reconstruction if needed
                         if self.unet_input_domain == 'image':
                             x = [self.model.reconstruction(s, scale=scale) for s in x]
-                        
 
-                        # Compute adjoints if needed for physics-informed training
-                        if self.physics is not None:
-                            adjoints = self.get_cached_adjoint(x, path, att, scale)
-                            x_ = adjoints
-                        else:
-                            x_ = x
-                        
                         # Denoise
-                        splits_infered = self.model(
-                            torch.cat(x_, dim=0), # concatenate splits along batch dimension for efficient inference
-                            attenuation_map=att, # repeat attenuation map accordingly
-                            scale=scale
-                        )
+
                         if self.supervised:
+                            splits_infered = self.model(
+                                torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
+                                attenuation_map=att,
+                                scale=scale,
+                            )
                             splits_infered = splits_infered.chunk(1, dim=0) # dummy chunk to have same format as unsupervised case for easier code reuse
                         else:
+                            splits_infered = self.model(
+                                torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
+                                attenuation_map=torch.cat(self.n_splits * [att, ], dim=0), # repeat attenuation map accordingly
+                                scale=torch.cat(self.n_splits * [scale, ], dim=0)
+                            )
                             splits_infered = torch.chunk(splits_infered, self.n_splits, dim=0)  # list of (B, C, H, W)
                         #
                         if self.unet_output_domain == 'photon' and not self.supervised:
@@ -576,10 +498,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             target = target
 
                         for (i, j) in pairwise_permutations:
-                            if self.unet_input_domain == 'photon' and self.unet_output_domain == 'image' and self.physics is not None:
-                                x_i = adjoints[i] # we use adjoint as input for inference and loss computation in physics-informed training
-                            else:
-                                x_i = x[i]
+                            x_i = x[i]
                             x_j = x[j]
                             # inference on i
                             out_i = splits_infered[i]
