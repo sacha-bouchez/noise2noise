@@ -107,7 +107,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
         self.num_workers = num_workers
 
-        self._id = hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
+        #
+        self_dict = self.__dict__.copy()
+        self_dict.pop('num_workers', None) # num_workers is not relevant for model signature and caching, as it does not affect the training results. We set it to a fixed value in get_data_loader instead.
+        self._id = hashlib.sha256(json.dumps(self_dict, sort_keys=True).encode()).hexdigest()
+ 
         #
         super(Noise2NoiseTrainer, self).__init__()
         #
