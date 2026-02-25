@@ -203,7 +203,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             n_channels=1,
             n_classes=1,
             bilinear=True,
-            normalize_input=True,
             input_domain=self.unet_input_domain,
             output_domain=self.unet_output_domain,
             physics=self.physics,
@@ -325,7 +324,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             else:
                 raise ValueError("Invalid objective type for photon domain. Supported types are 'poisson', 'mse' and 'mse_anscombe'.")
             return loss
-        
+
         if self.unet_input_domain == self.unet_output_domain == 'photon':
             loss = compute_count_loss(output, target)
         elif self.unet_input_domain == self.unet_output_domain == 'image':
@@ -432,8 +431,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # We only update n2n_ metrics and loss here
             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
             self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
-            # free up memory
-            torch.cuda.empty_cache()
             #
             return loss
 
