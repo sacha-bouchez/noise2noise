@@ -34,6 +34,25 @@ def backward_pet_radon(
             voxel_size_mm=voxel_size_mm
             )  # (B, C, H, W)
         loss = (Ax0 * y).sum()
-        loss.backward()
+        loss.backward(retain_graph=True)
+
+
         At_y = x0.grad  # (B, C, H, W)
-    return At_y.detach() 
+
+        # get sensitivity
+        x0 = torch.zeros_like(x0, requires_grad=True)
+        Ax0 = forward_pet_radon_operator.forward(
+            x0,
+            attenuation_map=attenuation_map,
+            scale=scale,
+            voxel_size_mm=voxel_size_mm
+            )  # (B, C, H, W)
+        ones = torch.ones_like(Ax0, device=Ax0.device)  # (B, C, H, W)
+        loss_sensitivity = (Ax0 * ones).sum()
+        loss_sensitivity.backward()
+        sensitivity = x0.grad  # (B, C, H, W)
+
+        At_y = At_y / (sensitivity + 1e-8)  # (B, C, H, W)
+
+    return At_y.detach()
+
