@@ -3,6 +3,7 @@ import mlflow
 import datetime
 import torchsummary
 from train.trainer import Noise2NoiseTrainer
+import torch
 
 if __name__ == "__main__":
 
@@ -13,7 +14,7 @@ if __name__ == "__main__":
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
             dataset_train_size=2048,
-            dataset_val_size=256,
+            dataset_val_size=512,
             val_freq=1,
             n_epochs=25,
             batch_size=4,
@@ -22,22 +23,27 @@ if __name__ == "__main__":
                 'image_size' : (160,160),
                 'voxel_size' : (2,2,2),
                 'n_angles' : 300,
-                'acquisition_time' : None, # temporary value, will be overridden
+                'acquisition_time' : 207.85, # temporary value, will be overridden
                 'scanner_radius' : 300,
-                'nb_counts' : 1e6,
+                'nb_counts' : 3e6,
+                'scatter_component' : 0.0, # 0.36
+                'random_component' : 0.0, # 0.50
             },
-            learning_rate=1e-3,
+            learning_rate=1e-4,
             unet_config = {
                 'conv_layer_type': 'Conv2d',
                 'n_levels': 4,
                 'global_conv': 32,
-                'residual': True
+                'residual': True,
+                'physics_mode': 'pre_inverse'
             },
             unet_input_domain=unet_input_domain,
             unet_output_domain=unet_output_domain,
             supervised=supervised,
             reconstruction_type='fbp',
             reconstruction_config={},
+            measurement_consistency_balance=1.0,
+            physics="backward_pet_radon",
             n_splits=2,
             num_workers=1,
             objective_type='poisson',
