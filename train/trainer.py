@@ -161,14 +161,29 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def create_data_loader(self):
 
+        # Get data generator for training
         self.dataset_train = SinogramGenerator(
                                          dest_path=os.path.join(self.dest_path, 'train'),
                                          length=self.dataset_train_size,
                                          seed=self.seed,
                                          **self.simulator_config
         )
-        loader_train = DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=self.shuffle, num_workers=self.num_workers)
-        #
+
+        # Set a separate Generator() object for training.
+        # Usefull for reproducible shuffling when num_workers > 0
+        self.train_generator = torch.Generator()
+        self.train_generator.manual_seed(self.seed)
+
+        # Create DataLoader with the generator for reproducibility
+        # NOTE On reboot, self.train_generator seed state is restored from previous runs in load_checkpoint()
+        loader_train = DataLoader(
+            self.dataset_train,
+            batch_size=self.batch_size,
+            shuffle=self.shuffle,
+            num_workers=self.num_workers,
+            generator=self.train_generator
+            )
+        
         # These parameters may be used for inference reconstruction or training backprojection later on, so we store them as trainer attributes so that they can be accessed from mlflow.
         self.scanner_radius = self.dataset_train.sinogram_simulator.scanner_radius
         self.voxel_size_mm = self.dataset_train.sinogram_simulator.voxel_size_mm
@@ -179,6 +194,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
         if 'acquisition_time' in self.simulator_config:
             self.simulator_config.pop('acquisition_time') # ensure acquisition time is same as training set
+
+        # Get data generator and loader for validation
         self.dataset_val = SinogramGenerator(
                                          dest_path=os.path.join(self.dest_path, 'val'),
                                          length=self.dataset_val_size,
@@ -186,8 +203,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                                          acquisition_time=self.dataset_train.acquisition_time, # use same acquisition time as training set
                                          **self.simulator_config
         )
-        loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
+        # Validation DataLoader. No shuffling, no Generator() needed for reproducibility.
+        loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
         return loader_train, loader_val
     
@@ -584,7 +602,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 mlflow.log_metric(metric_name, metric_value, step=epoch+1)
 
             # log reboot model as artifact
-            self.mlflow_log_model_as_artifact(epoch, artifact_path="reboot_model")
+            self.mlflow_log_checkpoint_as_artifact(epoch, artifact_path="reboot_model")
 
             torch.cuda.empty_cache()
 
