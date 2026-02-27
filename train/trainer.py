@@ -49,6 +49,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
             reconstruction_type='fbp',
             reconstruction_config={},
             measurement_consistency_balance=0.0,
+            regularizer=None,
+            regularization_balance=0.0,
             n_splits=2,
             num_workers=10,
             objective_type='poisson',
@@ -103,6 +105,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
             self.measurement_consistency_balance = 0.0 # no measurement consistency loss in supervised setting.
         else:
             self.measurement_consistency_balance = measurement_consistency_balance
+        self.regularization_balance = regularization_balance
+        if self.regularization_balance > 0.0:
+            assert regularizer is not None, "Regularization balance must be greater than 0 for regularization to be applied. Please specify a regularizer."
+            self.regularizer = regularizer
+        else:
+            self.regularizer = None
         self.seed = seed
 
         self.num_workers = num_workers
@@ -133,6 +141,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
             metrics.append( [ 'SSIM', { 'name': 'n2n_ssim'} ] )
         if f'loss_{self.objective_type.lower()}' not in [ m[0].lower() for m in metrics ]:
             metrics.append( [ 'Mean', { 'name': f'loss_{self.objective_type.lower()}'} ] )
+        if self.regularizer is not None and f'loss_reg_{self.regularizer.lower()}' not in [ m[0].lower() for m in metrics ]:
+                metrics.append( [ 'Mean', { 'name': f'loss_reg_{self.regularizer.lower()}'} ] )
         #
         self.metrics = super(Noise2NoiseTrainer, self).get_metrics(metrics)
         return self.metrics
@@ -142,7 +152,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
             if metric_names and metric.name not in metric_names:
                 continue
             if 'loss' in metric.name:
-                if loss is not None:
+                if isinstance(loss, dict):
+                    metric.update_state(None, loss.get(metric.name, torch.tensor(0.0)))
+                elif loss is not None:
                     metric.update_state(None, loss)
             else:
                 metric.update_state(y_true, y_pred)
@@ -347,7 +359,28 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     loss += self.measurement_consistency_balance * compute_count_loss(projected_output, input)
             else:
                 loss = self.objective(output, target)
+
+        # Add regularization loss if applicable
+        if self.regularizer is not None:
+            reg_loss = self.regularization_balance * self.compute_regularization_loss(output)
+        else:
+            reg_loss = 0.0
         #
+        return loss, reg_loss
+    
+    def compute_regularization_loss(self, output):
+        # output : (B, C, H, W)
+        if self.regularizer is not None:
+            if self.regularizer.lower().startswith('tv'):
+                # Total variation regularization
+                diffX = torch.abs(output[:, :, 1:, :] - output[:, :, :-1, :])
+                diffY = torch.abs(output[:, :, :, 1:] - output[:, :, :, :-1])
+                loss = torch.sum(diffX, dim=[1,2,3]) + torch.sum(diffY, dim=[1,2,3]) # sum over C, H, W dimensions
+                loss = torch.mean(loss) # average over batch dimension
+            else:
+                raise ValueError("Invalid regularizer type. Supported types are 'tv'.")
+        else:
+            loss = 0.0
         return loss
 
     def fit(self):
@@ -363,12 +396,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 loss_target = clean_img
             else:
                 loss_target = noisy_img_b
-            loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, attenuation_map=attenuation_map, scale=scale)
+            loss, reg_loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, attenuation_map=attenuation_map, scale=scale)
             # We only update n2n_ metrics and loss here
             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-            self.update_metrics(loss, normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
+            loss_dict = {f'loss_{self.objective_type.lower()}': loss}
+            if self.regularizer is not None:
+                loss_dict[f'loss_reg_{self.regularizer.lower()}'] = reg_loss
+            self.update_metrics(loss_dict, normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
             #
-            return loss
+            return loss + reg_loss if self.regularizer is not None else loss
 
         if self.initial_epoch == 0:
             self.compute_reference_metrics()
@@ -504,14 +540,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             out_i = splits_infered[i]
                             # Loss computation for pair (i, j)
                             if not self.supervised:
-                                val_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, attenuation_map=att, scale=scale)
+                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, attenuation_map=att, scale=scale)
                             else:
-                                val_loss = self.compute_loss(input=x_i, output=out_i, target=target, attenuation_map=att, scale=scale)
+                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=target, attenuation_map=att, scale=scale)
 
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-                            self.update_metrics(val_loss, normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
-
+                            self.update_metrics({f'loss_{self.objective_type.lower()}': val_loss, f'loss_{self.regularizer.lower()}': val_reg_loss}, normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
                             output = self.model.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
@@ -536,7 +571,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
             # metric monitoring
             m_dict = {**m_dict_train, **m_dict_val}
-            monitored_metrics = [ m for m in list(m_dict.keys()) if m.startswith('val_loss') ]  # currently only loss monitoring is supported
+            monitored_metrics = [ m for m in list(m_dict.keys()) if (m.startswith('val_loss_') and 'reg_' not in m) or m.startswith('val_im_') ]
             for metric_name in monitored_metrics:
                 if 'loss' in metric_name:
                     mode = 'min'
