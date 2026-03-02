@@ -168,18 +168,9 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         self.gaussian_PSF = geometry.get('gaussian_PSF_fwhm_mm', 4.0)
         self.voxel_size_mm = geometry.get('voxel_size_mm', 2.0)
         #
-        if self.input_domain == 'image' and self.output_domain == 'image':
-            self.image_size = image_size
-            self.sinogram_size = None
-        elif self.input_domain == 'photon' and self.output_domain == 'photon':
-            self.sinogram_size = sinogram_size
-            self.image_size = None
-        elif self.input_domain == 'photon' and self.output_domain == 'image':
-            self.sinogram_size = sinogram_size
-            self.image_size = image_size
-        else:
-            raise ValueError(f"Unsupported domain combination: input_domain={input_domain}, output_domain={output_domain}. Supported combinations are: photon to image, image to image, photon to photon.")
         #
+        self.image_size = image_size
+        self.sinogram_size = sinogram_size
         self.n_splits = n_splits
         self.reconstruction_type = reconstruction_type
         self.reconstruction_config = reconstruction_config
