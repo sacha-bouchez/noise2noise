@@ -76,6 +76,8 @@ class UnetNoise2NoisePETCommons:
         if not hasattr(self, 'reconstruction_operator'):
             self.get_reconstruction_operator()
         #
+        x_recon = self.reconstruction_operator.forward(x, **kwargs)  # (n_sinos*B, C, H, W)
+        #
         x_recon = x_recon.view(n_splits, batch_size, x_recon.shape[1], x_recon.shape[2], x_recon.shape[3])  # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
