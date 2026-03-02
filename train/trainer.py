@@ -392,8 +392,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
             if self.regularizer.lower().startswith('tv'):
                 # Total variation regularization
                 diffX = torch.abs(output[:, :, 1:, :] - output[:, :, :-1, :])
-                diffY = torch.abs(output[:, :, :, 1:] - output[:, :, :, :-1])
-                loss = torch.sum(diffX, dim=[1,2,3]) + torch.sum(diffY, dim=[1,2,3]) # sum over C, H, W dimensions
+                loss = torch.sum(diffX, dim=[1,2,3]) # sum over C, H, W dimensions
+                # In sinogram space, we only apply TV regularization along the detector axis.
+                if self.unet_output_domain == 'image':
+                    diffY = torch.abs(output[:, :, :, 1:] - output[:, :, :, :-1])
+                    loss += torch.sum(diffY, dim=[1,2,3]) # sum over C, H, W dimensions
                 loss = torch.mean(loss) # average over batch dimension
             else:
                 raise ValueError("Invalid regularizer type. Supported types are 'tv'.")
