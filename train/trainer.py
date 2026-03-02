@@ -612,9 +612,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
             torch.cuda.empty_cache()
 
-        # log final best models
-        for metric_name in monitored_metrics:
-            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"{self.model_name}_{metric_name}")
-
         # log final model
         mlflow.pytorch.log_model(self.model, artifact_path="final_model", registered_model_name=self.model_name)
+
+        # log final best models
+        for metric_name in monitored_metrics:
+            # retrieved best model checkpoint from artifact
+            self.load_checkpoint(artifact_path=f"best_model_{metric_name}")
+            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"{self.model_name}_{metric_name}")
