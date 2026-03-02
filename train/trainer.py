@@ -567,7 +567,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-                            self.update_metrics({f'loss_{self.objective_type.lower()}': val_loss, f'loss_{self.regularizer.lower()}': val_reg_loss}, normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
+                            loss_dict_val ={f'loss_{self.objective_type.lower()}': val_loss}
+                            if self.regularizer is not None:
+                                loss_dict_val[f'loss_reg_{self.regularizer.lower()}'] = val_reg_loss
+                            self.update_metrics(loss_dict_val, normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
                             output = self.model.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
