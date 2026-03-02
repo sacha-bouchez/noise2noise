@@ -139,6 +139,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
         ])
         if self.unet_output_domain == 'image':
             metrics.append( [ 'SSIM', { 'name': 'n2n_ssim'} ] )
+        for m in metrics:
+            if self.unet_output_domain == 'image':
+                m[1]['bkg_val'] = 0.0 
+            if 'im_' in m[1]['name']:
+                m[1]['bkg_val'] = 0.0
         if f'loss_{self.objective_type.lower()}' not in [ m[0].lower() for m in metrics ]:
             metrics.append( [ 'Mean', { 'name': f'loss_{self.objective_type.lower()}'} ] )
         if self.regularizer is not None and f'loss_reg_{self.regularizer.lower()}' not in [ m[0].lower() for m in metrics ]:
