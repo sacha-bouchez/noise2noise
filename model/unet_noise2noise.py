@@ -304,13 +304,14 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
             self.__dict__.update({param_key: param_value})
         print(f"Model parameters: input_domain={self.unet_input_domain}, output_domain={self.unet_output_domain}, reconstruction_algorithm={self.reconstruction_type}, n_splits={self.n_splits}, image_size={self.image_size}")
 
-    def forward(self, x, scale, seed=None, monte_carlo_steps=1, split=False):
+    def forward(self, x, scale, attenuation_map=None, seed=None, monte_carlo_steps=1, split=True):
         """
         Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
         The splitting process has some randomness; set seed for reproducibility.
         Use monte_carlo_steps > 1 for multiple stochastic passes and average the results.
         :param x: (B, C, H, W) input sinogram tensor
-        :param scale: (B,) scale factor to be applied to sinogram before reconstruction
+        :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
+        :param scale: (B,) scale factor to be applied to sinogram before reconstruction.
         :param seed: random seed for splitting
         :param monte_carlo_steps: number of stochastic passes to average
         :return: (B, C, H, W) output image tensor
@@ -341,7 +342,7 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
                 splits = self.reconstruction(splits, scale=scale, **self.reconstruction_config)  # (B * n_splits, C, H, W)
 
             # Denoise
-            splits_denoised = self.noise2noise_module(splits)
+            splits_denoised = self.noise2noise_module(splits, attenuation_map=attenuation_map, scale=scale)  # (B * n_splits, C, H, W)
 
             # Expand splits to have (n_splits, B, C, H, W)
             splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)
@@ -364,19 +365,9 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
     
 if __name__ == '__main__':
 
-    unet_noise2noise_pet = UNetNoise2NoisePET(
-        n_channels=1,
-        n_classes=1,
-        global_conv=32,
-        n_levels=4,
-        bilinear=True,
-        conv_layer_type='Conv2d',
-        residual=False,
-        input_domain='photon',
-        output_domain='image',
-        physics='backward_pet_radon',
-        physics_mode='pre_inverse',
-        image_size=(160, 160)
+    unet_noise2noise_pet = InferenceUNetNoise2Noise(
+        model_name="Noise2Noise_2DPET_photon_to_photon_N2N_val_im_psnr",
+        model_version=6,
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -386,7 +377,7 @@ if __name__ == '__main__':
     from tools.image.castor import read_castor_binary_file
     import os
 
-    dest_path = f"{os.getenv('WORKSPACE')}/data/noise2noise/train/data_0_48a33677"
+    dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
     sino, meta = read_castor_binary_file(os.path.join(dest_path, 'simu', 'simu_pt.s.hdr'), reader='numpy', return_metadata=True)
     scale = float(meta['scale_factor'])
     sino = torch.from_numpy(sino).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
