@@ -263,9 +263,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
     def get_objective(self):
         type = self.objective_type.lower()
         if 'mse' in type:
-            objective = torch.nn.MSELoss()
+            objective = torch.nn.MSELoss(reduction='none')
         elif type == 'poisson':
-            objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='mean')
+            objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='none')
+        # NOTE reduction is set to none to allow for background masking.
         #
         self.model.loss_type = type # inform model about loss type for potential post-processing
         #
@@ -344,7 +345,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             raise NotImplementedError("Currently only 'radon' forward operator is supported for photon to image domain conversion.")
         return sinogram
     
-    def compute_loss(self, input, output, target, attenuation_map=None, scale=None):
+    def compute_loss(self, input, output, target, mask=None, attenuation_map=None, scale=None):
 
         def compute_count_loss(output, target):
             """
@@ -388,6 +389,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
             else:
                 loss = self.objective(output, target)
 
+        # Apply reduction on loss
+        if mask is None:
+            mask = torch.ones_like(loss)
+        loss = loss * mask
+        loss = torch.sum(loss, dim=(1, 2, 3)) / torch.sum(mask, dim=(1, 2, 3)) # average loss per pixel
+        loss = torch.mean(loss) # average over batch
+
         # Add regularization loss if applicable
         if self.regularizer is not None:
             reg_loss = self.regularization_balance * self.compute_regularization_loss(output, **self.regularizer_kwargs)
@@ -422,7 +430,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 loss_target = clean_img
             else:
                 loss_target = noisy_img_b
-            loss, reg_loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, attenuation_map=attenuation_map, scale=scale)
+            #
+            mask = (clean_img > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
+            loss, reg_loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, mask=mask, attenuation_map=attenuation_map, scale=scale)
             # We only update n2n_ metrics and loss here
             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
             loss_dict = {f'loss_{self.objective_type.lower()}': loss}
@@ -559,6 +569,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         else:
                             target = target
 
+                        # Create mask
+                        mask = (gth > 0).float()
+
                         for (i, j) in pairwise_permutations:
                             x_i = x[i]
                             x_j = x[j]
@@ -566,9 +579,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             out_i = splits_infered[i]
                             # Loss computation for pair (i, j)
                             if not self.supervised:
-                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, attenuation_map=att, scale=scale)
+                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, mask=mask, attenuation_map=att, scale=scale)
                             else:
-                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=target, attenuation_map=att, scale=scale)
+                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=target, mask=mask, attenuation_map=att, scale=scale)
 
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
