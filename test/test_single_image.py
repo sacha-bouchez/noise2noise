@@ -237,11 +237,15 @@ if __name__ == "__main__":
 
     dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
 
+    model_name = "Noise2Noise_2DPET_image_to_image_N2N"
+    model_version = 15
+    nb_counts = 1e6
+
     inference_pipeline = SingleImageInferencePipeline(
-        model_name="Noise2Noise_2DPET_photon_to_photon",
-        model_version=1,
+        model_name=model_name,
+        model_version=model_version,
         dest_path=dest_path,
-        nb_counts=5e5,
+        nb_counts=nb_counts,
         simulator_args={
             'n_angles':300,
             'scanner_radius':300,
@@ -280,21 +284,27 @@ if __name__ == "__main__":
     print(f"Noise-free Reconstruction - PSNR: {PSNR_noise_free:.2f} dB, SSIM: {SSIM_noise_free:.4f}")
     print(f"Noisy Reconstruction - PSNR: {PSNR_noisy:.2f} dB, SSIM: {SSIM_noisy:.4f}")
 
-    fig, ax = plt.subplots(1,3, figsize=(10,5))
-    fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
+    fig, ax = plt.subplots(1,3, figsize=(10,3))
+    # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
     ax[1].imshow(recon_noise2noise, cmap='gray_r')
-    ax[1].set_title(f'Denoised Reconstruction\nPSNR: {PSNR_denoised:.2f} dB, SSIM: {SSIM_denoised:.4f}')
+    ax[1].set_title(f'Denoised')
     ax[1].axis('off')
+    plt.colorbar(ax[1].images[0], ax=ax[1], fraction=0.046, pad=0.04)
+    ax[1].annotate(f'PSNR: {PSNR_denoised:.2f} dB,\n SSIM: {SSIM_denoised:.4f}', xy=(0.05,0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
     ax[0].imshow(recon_noise_free, cmap='gray_r')
-    ax[0].set_title(f'Noise-free Reconstruction\nPSNR: {PSNR_noise_free:.2f} dB, SSIM: {SSIM_noise_free:.4f}')
+    ax[0].set_title(f'Noise-free')
     ax[0].axis('off')
+    plt.colorbar(ax[0].images[0], ax=ax[0], fraction=0.046, pad=0.04)
+    ax[0].annotate(f'PSNR: {PSNR_noise_free:.2f} dB,\n SSIM: {SSIM_noise_free:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
     ax[2].imshow(recon_noisy, cmap='gray_r')
-    ax[2].set_title(f'Noisy Reconstruction\nPSNR: {PSNR_noisy:.2f} dB, SSIM: {SSIM_noisy:.4f}')
+    ax[2].set_title(f'Noisy')
     ax[2].axis('off')
+    plt.colorbar(ax[2].images[0], ax=ax[2], fraction=0.046, pad=0.04)
+    ax[2].annotate(f'PSNR: {PSNR_noisy:.2f} dB,\n SSIM: {SSIM_noisy:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
-    plt.savefig(os.path.join(dest_path, f'recon_images_final_{int(inference_pipeline.nb_counts)}.png'))
+    plt.savefig(os.path.join(dest_path, f'results_{model_name}_{model_version}_{nb_counts}.png'))
 
     # #
     # n_samples = 10
