@@ -161,11 +161,17 @@ class SinogramGenerator(Dataset):
         data_nfpt = read_castor_binary_file(f'{dest_path}/simu/simu_nfpt.s.hdr')
         data_nfpt = torch.from_numpy(data_nfpt)
         #
-        data_gth = read_castor_binary_file(f'{dest_path}/object/object.hdr')
-        data_gth = torch.from_numpy(data_gth)
+        if os.path.exists(f'{dest_path}/object/object.hdr'):
+            data_gth = read_castor_binary_file(f'{dest_path}/object/object.hdr')
+            data_gth = torch.from_numpy(data_gth)
+        else:
+            data_gth = None
         #
-        data_att = read_castor_binary_file(f'{dest_path}/object/object_att.hdr')
-        data_att = torch.from_numpy(data_att)
+        if os.path.exists(f'{dest_path}/object/object_att.hdr'):
+            data_att = read_castor_binary_file(f'{dest_path}/object/object_att.hdr')
+            data_att = torch.from_numpy(data_att)
+        else:
+            data_att = None
         #
         return dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor
 
@@ -184,6 +190,62 @@ class SinogramGenerator(Dataset):
 
         dest_path, prompt, nfpt, gth, att, scale = self.generate_sample(idx)
         return dest_path, prompt, nfpt, gth, att, scale
+    
+class SinogramGeneratorSavedImages(SinogramGenerator):
+    """
+    Used to generate sinogram from pre-saved object images, for testing purposes.
+    """
+
+    def __init__(self, obj_path, att_path, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.obj_path = obj_path
+        self.att_path = att_path
+        if not isinstance(obj_path, list):
+            self.obj_path = [obj_path]
+        if not isinstance(att_path, list):
+            self.att_path = [att_path]
+        #
+        assert len(self.obj_path) == len(self.att_path), "obj_path and att_path should have the same length"
+        #
+        for idx in range(len(self)):
+            assert os.path.exists(self.obj_path[idx]), f"Object path {self.obj_path[idx]} does not exist"
+            assert os.path.exists(self.att_path[idx]), f"Attenuation map path {self.att_path[idx]} does not exist"
+        #
+        assert hasattr(self, "nb_counts"), "nb_counts attribute should be defined in the parent class"
+
+    def __len__(self):
+        return len(self.obj_path)
+
+    def generate_phantom(self, idx):
+        return self.obj_path[idx], self.att_path[idx]
+    
+    def set_acquisition_time(self, idx):
+        # Read Image ground truth
+        data_gth = read_castor_binary_file(self.obj_path[idx]).squeeze()
+        data_att = read_castor_binary_file(self.att_path[idx]).squeeze()
+        # Simulate true counts
+        _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(data_gth, data_att)
+        # Get total counts in the noise-free prompt sinogram
+        counts = noise_free_prompt.sum()  # in counts
+        # Compute acquisition time to reach desired counts (nb_counts)
+        half_life = self.sinogram_simulator.half_life
+        self.acquisition_time = (self.nb_counts / counts) * half_life / np.log(2)
+        return self.acquisition_time
+    
+    def simulate_sinogram(self, idx):
+
+        self.set_acquisition_time(idx)
+        #
+        dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor = super().simulate_sinogram(idx)
+        #
+        data_gth = read_castor_binary_file(self.obj_path[idx])
+        data_gth = torch.from_numpy(data_gth)
+        #
+        data_att = read_castor_binary_file(self.att_path[idx])
+        data_att = torch.from_numpy(data_att)
+        #
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor
+
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
 

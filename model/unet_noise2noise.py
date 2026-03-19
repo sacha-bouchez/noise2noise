@@ -138,6 +138,63 @@ class UnetNoise2NoisePETCommons:
         splits.append(remaining)  # last split gets leftovers
 
         return splits
+    
+    def forward_inference(self, x, scale, attenuation_map=None, seed=None, monte_carlo_steps=1, split=True):
+        """
+        Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
+        The splitting process has some randomness; set seed for reproducibility.
+        Use monte_carlo_steps > 1 for multiple stochastic passes and average the results.
+        :param x: (B, C, H, W) input sinogram tensor
+        :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
+        :param scale: (B,) scale factor to be applied to sinogram before reconstruction.
+        :param seed: random seed for splitting
+        :param monte_carlo_steps: number of stochastic passes to average
+        :return: (B, C, H, W) output image tensor
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        # Stack scale accordingly
+        if split:
+            scale = (scale / self.n_splits).repeat(self.n_splits) # Dividing the number of counts by n_splits is equivalent to dividing scale factor by n_splits
+
+        outputs = torch.zeros((x.shape[0], x.shape[1], self.image_size[0], self.image_size[1]), device=x.device) # (B, C, H, W)
+        for i in range(monte_carlo_steps):
+            # Split input sinogram
+            if split:
+                splits = self.split_prompt(x, mode='multinomial', consistent=False)  # list of (B, C, H, W)
+            else:
+                splits = [x]
+
+            # Concatenate splits along batch dimension
+            splits = torch.cat(splits, dim=0)  # (B * n_splits, C, H, W)
+
+
+            # Apply reconstruction if needed
+            if self.unet_input_domain == 'image':
+                splits = self.reconstruction(splits, scale=scale, **self.reconstruction_config)  # (B * n_splits, C, H, W)
+
+            # Denoise
+            splits_denoised = self.forward(splits, attenuation_map=attenuation_map, scale=scale)  # (B * n_splits, C, H, W)
+
+            # Expand splits to have (n_splits, B, C, H, W)
+            splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)
+
+            # Apply reconstruction if needed and average outputs
+            if self.unet_output_domain == 'photon':
+                output = self.reconstruction(*splits_denoised, scale=scale, **self.reconstruction_config) # (B, C, H, W)
+            else:
+                splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
+                output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)
+
+            outputs += output
+
+            # torch.cuda.empty_cache()
+            # time.sleep(5)
+
+        # Average over monte carlo steps
+        outputs = outputs / monte_carlo_steps # (B, C, H, W)
+        return outputs
 
 class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
 
@@ -274,19 +331,19 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
         self.device = self.get_device()
         
         # Load Noise2Noise module from MLflow
-        self.noise2noise_module = self.get_noise2noise_module(model_name, model_version)
+        self.model = self.get_model(model_name, model_version)
         run_id = mlflow.MlflowClient().get_model_version(model_name, model_version).run_id
         self.get_run_parameters(run_id)
 
-    def get_noise2noise_module(self, model_name, model_version):
+    def get_model(self, model_name, model_version):
         """
         Load registered model from MLflow.
         """
         model_uri = f"models:/{model_name}/{model_version}"
-        self.noise2noise_module = mlflow.pytorch.load_model(model_uri=model_uri, map_location=self.device)
+        self.model = mlflow.pytorch.load_model(model_uri=model_uri, map_location=self.device)
         print(f"Loaded model '{model_name}' version {model_version} from MLflow.")
-        self.noise2noise_module.eval()
-        return self.noise2noise_module
+        self.model.eval()
+        return self.model
     
     def get_run_parameters(self, run_id):
         """
@@ -304,70 +361,12 @@ class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrai
             self.__dict__.update({param_key: param_value})
         print(f"Model parameters: input_domain={self.unet_input_domain}, output_domain={self.unet_output_domain}, reconstruction_algorithm={self.reconstruction_type}, n_splits={self.n_splits}, image_size={self.image_size}")
 
-    def forward(self, x, scale, attenuation_map=None, seed=None, monte_carlo_steps=1, split=True):
-        """
-        Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
-        The splitting process has some randomness; set seed for reproducibility.
-        Use monte_carlo_steps > 1 for multiple stochastic passes and average the results.
-        :param x: (B, C, H, W) input sinogram tensor
-        :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
-        :param scale: (B,) scale factor to be applied to sinogram before reconstruction.
-        :param seed: random seed for splitting
-        :param monte_carlo_steps: number of stochastic passes to average
-        :return: (B, C, H, W) output image tensor
-        """
-        if seed is not None:
-            torch.manual_seed(seed)
-
-        # Stack scale accordingly
-        if split:
-            scale = (scale / self.n_splits).repeat(self.n_splits) # Dividing the number of counts by n_splits is equivalent to dividing scale factor by n_splits
-
-        outputs = torch.zeros((x.shape[0], x.shape[1], self.image_size[0], self.image_size[1]), device=self.device)
-        for i in range(monte_carlo_steps):
-            if monte_carlo_steps > 1:
-                print(f"Monte Carlo step {i+1}/{monte_carlo_steps}")
-            # Split input sinogram
-            if split:
-                splits = self.split_prompt(x, mode='multinomial', consistent=False)  # list of (B, C, H, W)
-            else:
-                splits = [x]
-
-            # Concatenate splits along batch dimension
-            splits = torch.cat(splits, dim=0)  # (B * n_splits, C, H, W)
-
-
-            # Apply reconstruction if needed
-            if self.unet_input_domain == 'image':
-                splits = self.reconstruction(splits, scale=scale, **self.reconstruction_config)  # (B * n_splits, C, H, W)
-
-            # Denoise
-            splits_denoised = self.noise2noise_module(splits, attenuation_map=attenuation_map, scale=scale)  # (B * n_splits, C, H, W)
-
-            # Expand splits to have (n_splits, B, C, H, W)
-            splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)
-
-            # Apply reconstruction if needed and average outputs
-            if self.unet_output_domain == 'photon':
-                output = self.reconstruction(*splits_denoised, scale=scale, **self.reconstruction_config) # (B, C, H, W)
-            else:
-                splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
-                output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)
-
-            outputs += output
-
-            # torch.cuda.empty_cache()
-            # time.sleep(5)
-
-        # Average over monte carlo steps
-        outputs = outputs / monte_carlo_steps # (B, C, H, W)
-        return outputs
     
 if __name__ == '__main__':
 
     unet_noise2noise_pet = InferenceUNetNoise2Noise(
-        model_name="Noise2Noise_2DPET_photon_to_photon_N2N_val_im_psnr",
-        model_version=6,
+        model_name="Noise2Noise_2DPET_image_to_image_N2N_val_im_psnr",
+        model_version=3,
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

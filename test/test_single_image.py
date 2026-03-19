@@ -194,7 +194,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
         x, scale = self.prepare_input(file_path)
         # forward pass through the model
         with torch.no_grad():
-            x_recon = self.model.forward(x, scale=scale, split=True)
+            x_recon = self.model.forward_inference(x, scale=scale, split=True)
             x_recon = x_recon.squeeze(0)  # remove batch dimension
         #w', f
         write_binary_file(

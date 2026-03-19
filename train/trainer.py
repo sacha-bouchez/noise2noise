@@ -7,12 +7,15 @@ import hashlib, json
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from noise2noise.data.data_loader import SinogramGenerator
+from noise2noise.data.data_loader import SinogramGenerator, SinogramGeneratorSavedImages
 from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
 
 from pytorcher.trainer import PytorchTrainer
 from pytorcher.utils import normalize_batch, PetForwardRadon
 from pytorcher.utils.prior import *
+
+from tools.image.metrics import PSNR, SSIM
+from tools.image.processing import reverse_grayscale
 
 def anscombe(x):
     return 2 * torch.sqrt( x + (3/8) )
@@ -217,6 +220,17 @@ class Noise2NoiseTrainer(PytorchTrainer):
         # Validation DataLoader. No shuffling, no Generator() needed for reproducibility.
         loader_val = DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
+        # Generate SinogramGenerator for testing on specific images
+        # For instance the brain phantom
+        self.dataset_val_specific = SinogramGeneratorSavedImages(
+            dest_path=os.path.join(self.dest_path, 'val_specific'),
+            acquisition_time=self.dataset_train.acquisition_time, # use same acquisition time as training set
+            seed = self.seed,
+            obj_path=f"{os.getenv('WORKSPACE')}/data/brain_web_phantom/object/gt_web_after_scaling.hdr",
+            att_path=f"{os.getenv('WORKSPACE')}/data/brain_web_phantom/object/attenuat_brain_phantom.hdr",
+            **self.simulator_config
+        )
+
         return loader_train, loader_val
     
     def get_pet_forward_operator(self):
@@ -257,6 +271,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
             **self.unet_config
         )
         model = model.to(self.device)
+        #
+        model.unet_input_domain = self.unet_input_domain
+        model.unet_output_domain = self.unet_output_domain
         #
         return model
 
@@ -610,6 +627,37 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     # print(f'{metric.name}: {metric.result():.4f}')
                     # m_dict.update({f'val_{metric.name}': metric.result()})
                     metric.reset_states()
+
+            # perform evaluation on brain phantom and log results as artifact for visual inspection of model performance evolution during training
+            for batch_idx, (path, prompt, nfpt, gth, att, scale) in enumerate(self.dataset_val_specific):
+
+                print(f'Inference on brain phantom for visual inspection of model performance evolution during training, batch {batch_idx+1}/{len(self.dataset_val_specific)} ...')
+
+                gth = gth.to('cpu').float().squeeze().detach().numpy().astype(np.float32)
+
+                # move data to device
+                prompt = prompt.to(self.device).float().unsqueeze(0) # add batch dimension
+                scale = torch.tensor(scale).to(self.device).float().unsqueeze(0) # add batch dimension
+                att = att.to(self.device).float().unsqueeze(0) # add batch dimension
+
+                #
+                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=10, split=True)
+                recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
+
+                # Apply LUT on reconstructed image
+                recon_noise2noise = reverse_grayscale(recon_noise2noise)
+
+                # Compute metrics
+                PSNR_denoised = PSNR(I=gth, K=recon_noise2noise, mask=gth>0)
+                SSIM_denoised = SSIM(img1=gth, img2=recon_noise2noise, mask=gth>0)
+                metrics = {
+                    'psnr': PSNR_denoised.item(),
+                    'ssim': SSIM_denoised.item()
+                }
+
+                #
+                mlflow.log_dict(metrics, f'brain_phantom/metrics_epoch_{epoch+1}.json')
+                mlflow.log_image(recon_noise2noise, f'brain_phantom/denoised_epoch_{epoch+1}.png')
 
             # metric monitoring
             m_dict = {**m_dict_train, **m_dict_val}
