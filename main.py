@@ -7,35 +7,38 @@ import torch
 
 if __name__ == "__main__":
 
-    unet_input_domain = 'photon'
+    unet_input_domain = 'image'
     unet_output_domain = 'image'
     supervised = False
 
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
-            dataset_train_size=2048,
-            dataset_val_size=512,
+            dataset_train_size=8192,
+            dataset_val_size=2048,
             val_freq=1,
             n_epochs=25,
-            batch_size=4,
+            batch_size=16,
             shuffle=True,
             simulator_config={
                 'image_size' : (160,160),
                 'voxel_size' : (2,2,2),
                 'n_angles' : 300,
-                'acquisition_time' : 207.85, # temporary value, will be overridden
+                'acquisition_time' : 207.85, # 207.85 is a pre-computed value to match 1e6 counts
                 'scanner_radius' : 300,
-                'nb_counts' : 3e6,
-                'scatter_component' : 0.0, # 0.36
-                'random_component' : 0.0, # 0.50
+                'nb_counts' : 1e6,
+                'scatter_component' : 0.36,
+                'random_component' : 0.50
             },
             learning_rate=1e-4,
             unet_config = {
                 'conv_layer_type': 'Conv2d',
                 'n_levels': 4,
                 'global_conv': 32,
-                'residual': True,
-                'physics_mode': 'pre_inverse'
+                'residual_conv': True,
+                'physics_mode': 'pre_inverse',
+                'residual': False,
+                'out_act': 'softplus',
+                'init': 'dirac'
             },
             unet_input_domain=unet_input_domain,
             unet_output_domain=unet_output_domain,
@@ -43,13 +46,10 @@ if __name__ == "__main__":
             reconstruction_type='fbp',
             reconstruction_config={},
             measurement_consistency_balance=1.0,
-            regularizer='gibbs',
-            regularization_config={'gamma': 10.0},
-            regularization_balance=1e2,
             physics="backward_pet_radon",
             n_splits=2,
             num_workers=1,
-            objective_type='poisson',
+            objective_type='mse',
             seed=42
     )
 
