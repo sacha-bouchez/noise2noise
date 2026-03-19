@@ -11,7 +11,8 @@ from noise2noise.data.data_loader import SinogramGenerator
 from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
 
 from pytorcher.trainer import PytorchTrainer
-from pytorcher.utils import normalize_batch, PetForwardRadon, tensor_hash
+from pytorcher.utils import normalize_batch, PetForwardRadon
+from pytorcher.utils.prior import *
 
 def anscombe(x):
     return 2 * torch.sqrt( x + (3/8) )
@@ -50,6 +51,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             reconstruction_config={},
             measurement_consistency_balance=0.0,
             regularizer=None,
+            regularization_config={},
             regularization_balance=0.0,
             n_splits=2,
             num_workers=10,
@@ -111,6 +113,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             self.regularizer = regularizer
         else:
             self.regularizer = None
+        self.regularizer_kwargs = regularization_config if regularizer is not None else {}
         self.seed = seed
 
         self.num_workers = num_workers
@@ -387,26 +390,21 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
         # Add regularization loss if applicable
         if self.regularizer is not None:
-            reg_loss = self.regularization_balance * self.compute_regularization_loss(output)
+            reg_loss = self.regularization_balance * self.compute_regularization_loss(output, **self.regularizer_kwargs)
         else:
             reg_loss = 0.0
         #
         return loss, reg_loss
     
-    def compute_regularization_loss(self, output):
+    def compute_regularization_loss(self, output, **kwargs):
         # output : (B, C, H, W)
-        if self.regularizer is not None:
+        if self.regularizer is not None and self.unet_output_domain == 'image':
             if self.regularizer.lower().startswith('tv'):
-                # Total variation regularization
-                diffX = torch.abs(output[:, :, 1:, :] - output[:, :, :-1, :])
-                loss = torch.sum(diffX, dim=[1,2,3]) # sum over C, H, W dimensions
-                # In sinogram space, we only apply TV regularization along the detector axis.
-                if self.unet_output_domain == 'image':
-                    diffY = torch.abs(output[:, :, :, 1:] - output[:, :, :, :-1])
-                    loss += torch.sum(diffY, dim=[1,2,3]) # sum over C, H, W dimensions
-                loss = torch.mean(loss) # average over batch dimension
+                loss = total_variation(output, **kwargs)
+            elif self.regularizer.lower().startswith('gibbs'):
+                loss = gibbs(output, **kwargs)
             else:
-                raise ValueError("Invalid regularizer type. Supported types are 'tv'.")
+                raise ValueError("Invalid regularizer type. Supported types are 'tv' and 'gibbs'.")
         else:
             loss = 0.0
         return loss
