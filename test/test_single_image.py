@@ -20,14 +20,15 @@ class SingleImageInferencePipeline(PytorchTrainer):
             dest_path='./',
             nb_counts=3e6,
             simulator_args={},
+            device=None,
             seed=42):
         #
         self.dest_path = dest_path
         self.nb_counts = nb_counts
         self.set_seed(seed)
         #
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self.get_model(model_name, model_version)
-        self.device = self.model.device
         #
         self.is_simulated = False
         # Get simulator and reconstructor
@@ -40,6 +41,8 @@ class SingleImageInferencePipeline(PytorchTrainer):
             model_version=model_version
         )
         self.model.eval()
+        self.model.to(self.device)
+        self.model.device = self.device
         return self.model
     
     def set_image(self, img_path, img_att_path):
