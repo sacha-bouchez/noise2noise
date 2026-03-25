@@ -644,9 +644,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=10, split=True)
                 recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
 
-                # Apply LUT on reconstructed image
-                recon_noise2noise = reverse_grayscale(recon_noise2noise)
-
                 # Compute metrics
                 PSNR_denoised = PSNR(I=gth, K=recon_noise2noise, mask=gth>0)
                 SSIM_denoised = SSIM(img1=gth, img2=recon_noise2noise, mask=gth>0)
@@ -654,6 +651,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     'psnr': PSNR_denoised.item(),
                     'ssim': SSIM_denoised.item()
                 }
+
+                # Apply LUT on reconstructed image
+                recon_noise2noise = reverse_grayscale(recon_noise2noise)
 
                 #
                 mlflow.log_dict(metrics, f'brain_phantom/metrics_epoch_{epoch+1}.json')
