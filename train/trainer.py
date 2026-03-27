@@ -40,7 +40,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 'scanner_radius' : 300,
                 'nb_counts' : 1e6,
             },
-            learning_rate=1e-3,
+            optimizer_config={
+                'lr': 1e-3,
+                'weight_decay': 1e-5,
+            },
             unet_config = {
                 'conv_layer_type': 'SinogramConv2d',
                 'n_levels': 4,
@@ -66,7 +69,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.simulator_config = simulator_config
-        self.learning_rate = learning_rate
+        self.optimizer_config = optimizer_config
         self.supervised = supervised
         self.image_size = simulator_config.get('image_size', (160,160))
         # Validate task parameters
@@ -234,7 +237,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         )
 
     def get_optimizer(self, learning_rate=1e-3):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.Adam(self.model.parameters(), **self.optimizer_config)
         return optimizer
 
     def get_signature(self):
