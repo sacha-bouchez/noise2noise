@@ -53,9 +53,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             reconstruction_type='fbp',
             reconstruction_config={},
             measurement_consistency_balance=0.0,
-            regularizer=None,
-            regularization_config={},
-            regularization_balance=0.0,
             n_splits=2,
             num_workers=10,
             objective_type='poisson',
@@ -110,13 +107,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             self.measurement_consistency_balance = 0.0 # no measurement consistency loss in supervised setting.
         else:
             self.measurement_consistency_balance = measurement_consistency_balance
-        self.regularization_balance = regularization_balance
-        if self.regularization_balance > 0.0:
-            assert regularizer is not None, "Regularization balance must be greater than 0 for regularization to be applied. Please specify a regularizer."
-            self.regularizer = regularizer
-        else:
-            self.regularizer = None
-        self.regularizer_kwargs = regularization_config if regularizer is not None else {}
         self.seed = seed
 
         self.num_workers = num_workers
@@ -154,23 +144,24 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     m[1]['bkg_val'] = 0.0
         if f'loss_{self.objective_type.lower()}' not in [ m[0].lower() for m in metrics ]:
             metrics.append( [ 'Mean', { 'name': f'loss_{self.objective_type.lower()}'} ] )
-        if self.regularizer is not None and f'loss_reg_{self.regularizer.lower()}' not in [ m[0].lower() for m in metrics ]:
-                metrics.append( [ 'Mean', { 'name': f'loss_reg_{self.regularizer.lower()}'} ] )
         #
         self.metrics = super(Noise2NoiseTrainer, self).get_metrics(metrics)
         return self.metrics
 
-    def update_metrics(self, loss, y_true, y_pred, metric_names=[]):
+    def update_metrics(self, y_true, y_pred, metric_names=[]):
         for metric in self.metrics:
             if metric_names and metric.name not in metric_names:
                 continue
+            if 'loss' not in metric.name:
+                metric.update_state(y_true, y_pred)
+
+    def update_loss(self, loss):
+        for metric in self.metrics:
             if 'loss' in metric.name:
                 if isinstance(loss, dict):
                     metric.update_state(None, loss.get(metric.name, torch.tensor(0.0)))
                 elif loss is not None:
                     metric.update_state(None, loss)
-            else:
-                metric.update_state(y_true, y_pred)
 
     def create_data_loader(self):
 
@@ -324,13 +315,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     recon_nfpt = self.model.reconstruction(nfpt, scale=scale)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'nfpt' in m.name ]
-                    self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
+                    self.update_metrics(normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
 
                     # reconstruction from prompt sinogram
                     recon_prompt = self.model.reconstruction(prompt, scale=scale)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'prompt' in m.name ]
-                    self.update_metrics(None, normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
+                    self.update_metrics(normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
 
                 print('Reference metrics on validation set before training:')
                 for metric in self.metrics:
@@ -361,6 +352,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
         else:
             raise NotImplementedError("Currently only 'radon' forward operator is supported for photon to image domain conversion.")
         return sinogram
+
+    def computes_masked_loss(self, loss, mask=None):
+        if mask is not None:
+            loss = loss * mask
+            loss = torch.sum(loss, dim=(1, 2, 3)) / torch.sum(mask, dim=(1, 2, 3)) # average loss per pixel
+            loss = torch.mean(loss) # average over batch
+        else:
+            loss = torch.mean(loss)
+        return loss
     
     def compute_loss(self, input, output, target, mask=None, attenuation_map=None, scale=None):
 
@@ -409,29 +409,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         # Apply reduction on loss
         if mask is None:
             mask = torch.ones_like(loss)
-        loss = loss * mask
-        loss = torch.sum(loss, dim=(1, 2, 3)) / torch.sum(mask, dim=(1, 2, 3)) # average loss per pixel
-        loss = torch.mean(loss) # average over batch
-
-        # Add regularization loss if applicable
-        if self.regularizer is not None:
-            reg_loss = self.regularization_balance * self.compute_regularization_loss(output, **self.regularizer_kwargs)
-        else:
-            reg_loss = 0.0
+        loss = self.computes_masked_loss(loss, mask)
         #
-        return loss, reg_loss
-    
-    def compute_regularization_loss(self, output, **kwargs):
-        # output : (B, C, H, W)
-        if self.regularizer is not None and self.unet_output_domain == 'image':
-            if self.regularizer.lower().startswith('tv'):
-                loss = total_variation(output, **kwargs)
-            elif self.regularizer.lower().startswith('gibbs'):
-                loss = gibbs(output, **kwargs)
-            else:
-                raise ValueError("Invalid regularizer type. Supported types are 'tv' and 'gibbs'.")
-        else:
-            loss = 0.0
         return loss
 
     def fit(self):
@@ -448,16 +427,16 @@ class Noise2NoiseTrainer(PytorchTrainer):
             else:
                 loss_target = noisy_img_b
             #
-            mask = (clean_img > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
-            loss, reg_loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, mask=mask, attenuation_map=attenuation_map, scale=scale)
+            if self.unet_input_domain == 'image':
+                mask = (clean_img > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
+            else:
+                mask = None
+            loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, mask=mask, attenuation_map=attenuation_map, scale=scale)
             # We only update n2n_ metrics and loss here
             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-            loss_dict = {f'loss_{self.objective_type.lower()}': loss}
-            if self.regularizer is not None:
-                loss_dict[f'loss_reg_{self.regularizer.lower()}'] = reg_loss
-            self.update_metrics(loss_dict, normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
+            self.update_metrics(normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
             #
-            return loss + reg_loss if self.regularizer is not None else loss
+            return loss, output
 
         if self.initial_epoch == 0:
             self.compute_reference_metrics()
@@ -515,6 +494,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     split_losses.append(loss_ij)
                 # global loss
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
+                # Update loss
+                self.update_loss(loss)
                 # Backpropagation
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -587,7 +568,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             target = target
 
                         # Create mask
-                        mask = (gth > 0).float()
+                        if self.unet_output_domain == 'image':
+                            mask = (gth > 0).float()
+                        else:
+                            mask = None
 
                         for (i, j) in pairwise_permutations:
                             x_i = x[i]
@@ -596,16 +580,14 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             out_i = splits_infered[i]
                             # Loss computation for pair (i, j)
                             if not self.supervised:
-                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, mask=mask, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(input=x_i, output=out_i, target=x_j, mask=mask, attenuation_map=att, scale=scale)
                             else:
-                                val_loss, val_reg_loss = self.compute_loss(input=x_i, output=out_i, target=target, mask=mask, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(input=x_i, output=out_i, target=target, mask=mask, attenuation_map=att, scale=scale)
 
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-                            loss_dict_val ={f'loss_{self.objective_type.lower()}': val_loss}
-                            if self.regularizer is not None:
-                                loss_dict_val[f'loss_reg_{self.regularizer.lower()}'] = val_reg_loss
-                            self.update_metrics(loss_dict_val, normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
+                            self.update_metrics(normalize_batch(target), normalize_batch(out_i), metric_names=metrics_to_update)
+                            self.update_loss(val_loss)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
                             output = self.model.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
@@ -615,7 +597,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                         # Update im_ metrics for validation
                         metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('im_') ]
-                        self.update_metrics(None, normalize_batch(gth), normalize_batch(output), metric_names=metrics_to_update)
+                        self.update_metrics(normalize_batch(gth), normalize_batch(output), metric_names=metrics_to_update)
                         # TODO compare im_ metrics with reconstruction without denoising and with nfpt only
                         
                         #
