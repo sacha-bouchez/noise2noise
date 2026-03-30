@@ -418,29 +418,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
     def fit(self):
 
-        def inference_pair_loss_metrics(noisy_img_a, noisy_img_b, clean_img, attenuation_map=None, scale=None):
-            """ Perform inference with a as input and b as target, and compute loss """
-            output = self.model(
-                noisy_img_a,
-                attenuation_map=attenuation_map,
-                scale=scale
-            )
-            if self.supervised:
-                loss_target = clean_img
-            else:
-                loss_target = noisy_img_b
-            #
-            if self.unet_input_domain == 'image':
-                mask = (clean_img > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
-            else:
-                mask = None
-            loss = self.compute_loss(input=noisy_img_a, output=output, target=loss_target, mask=mask, attenuation_map=attenuation_map, scale=scale)
-            # We only update n2n_ metrics and loss here
-            metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
-            self.update_metrics(normalize_batch(clean_img), normalize_batch(output), metric_names=metrics_to_update)
-            #
-            return loss, output
-
         if self.initial_epoch == 0:
             self.compute_reference_metrics()
         
@@ -452,7 +429,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             m_dict_train = {}
             # TRAIN
             self.model.train()
-            for batch_idx, (path, prompt, nfpt, gth, att, scale) in enumerate(self.loader_train):
+            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.loader_train):
 
                 # Set target for taské
                 if self.unet_output_domain == 'image':
@@ -465,7 +442,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 target = target.to(self.device).float()
                 scale = scale.to(self.device).float()
                 att = att.to(self.device).float()
-
+                att_sino = att_sino.to(self.device).float()
+                #
                 # split prompt with multinomial statistics
                 split_losses = []
                 if not self.supervised:
@@ -493,7 +471,26 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     x_i = x[i]
                     x_j = x[j]
                     # Inference and loss computation for pair (i, j)
-                    loss_ij = inference_pair_loss_metrics(x_i, x_j, target, attenuation_map=att, scale=scale)
+                    output_i = self.model(
+                        x_i,
+                        attenuation_map=att,
+                        scale=scale
+                    )
+                    if self.supervised:
+                        loss_target = target
+                    else:
+                        loss_target = x_j
+                    #
+                    if self.unet_input_domain == 'image':
+                        mask = (target > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
+                    else:
+                        mask = (att_sino > 0).float() # in photon domain, we compute loss only on pixels with non-zero attenuation, as these are the pixels that contribute to the sinogram and can be learned from.
+                        # TODO 1.02 threshold
+                    loss_ij = self.compute_loss(input=x_i, output=output_i, target=loss_target, mask=mask, attenuation_map=att, scale=scale)
+                    # We only update n2n_ metrics and loss here
+                    metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
+                    self.update_metrics(normalize_batch(target), normalize_batch(output_i), metric_names=metrics_to_update)
+                    #
                     split_losses.append(loss_ij)
                 # global loss
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
@@ -521,7 +518,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # run model in evaluation mode and avoid building computation graph
                 self.model.eval()
                 with torch.no_grad():
-                    for batch_idx, (path, prompt, nfpt, gth, att, scale) in enumerate(self.loader_val):
+                    for batch_idx, (_, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.loader_val):
 
                         # set target for task
                         if self.unet_output_domain == 'image':
@@ -535,7 +532,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         gth = gth.to(self.device).float()
                         scale = scale.to(self.device).float()
                         att = att.to(self.device).float()
-
+                        att_sino = att_sino.to(self.device).float()
+                        #
                         if not self.supervised:
                             # Split data with multinomial statistics. This is done to match training data distribution
                             x = self.model.split_prompt(prompt, mode='multinomial')
@@ -574,7 +572,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         if self.unet_output_domain == 'image':
                             mask = (gth > 0).float()
                         else:
-                            mask = None
+                            mask = (att_sino > 0).float()
 
                         for (i, j) in pairwise_permutations:
                             x_i = x[i]

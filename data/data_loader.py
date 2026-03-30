@@ -173,24 +173,30 @@ class SinogramGenerator(Dataset):
         else:
             data_att = None
         #
-        return dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor
+        if os.path.exists(f'{dest_path}/simu/simu_att.s.hdr'):
+            data_att_sino = read_castor_binary_file(f'{dest_path}/simu/simu_att.s.hdr')
+            data_att_sino = torch.from_numpy(data_att_sino)
+        else:
+            data_att_sino = None
+        #
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor
 
 
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        dest_path, prompt, nfpt, gth, att, scale_factor = self.simulate_sinogram(idx)
+        dest_path, prompt, nfpt, gth, att, att_sino, scale_factor = self.simulate_sinogram(idx)
 
-        return dest_path, prompt, nfpt, gth, att, scale_factor
+        return dest_path, prompt, nfpt, gth, att, att_sino, scale_factor
 
     def __getitem__(self, idx):
         """
         Output shape : (1, H, W)
         """
 
-        dest_path, prompt, nfpt, gth, att, scale = self.generate_sample(idx)
-        return dest_path, prompt, nfpt, gth, att, scale
-    
+        dest_path, prompt, nfpt, gth, att, att_sino, scale = self.generate_sample(idx)
+        return dest_path, prompt, nfpt, gth, att, att_sino, scale
+
 class SinogramGeneratorSavedImages(SinogramGenerator):
     """
     Used to generate sinogram from pre-saved object images, for testing purposes.
