@@ -103,7 +103,7 @@ class SinogramGenerator(Dataset):
             obj = read_castor_binary_file(obj_path).squeeze()
             att = read_castor_binary_file(att_path).squeeze()
             # Simulate true counts
-            _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(obj, att)
+            _ , _, _, noise_free_prompt, _ = self.sinogram_simulator.get_nfpt(obj, att)
             # Get total counts in the noise-free prompt sinogram
             counts = noise_free_prompt.sum()  # in counts
             #
@@ -230,7 +230,7 @@ class SinogramGeneratorSavedImages(SinogramGenerator):
         data_gth = read_castor_binary_file(self.obj_path[idx]).squeeze()
         data_att = read_castor_binary_file(self.att_path[idx]).squeeze()
         # Simulate true counts
-        _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(data_gth, data_att)
+        _ , _, _, noise_free_prompt, _ = self.sinogram_simulator.get_nfpt(data_gth, data_att)
         # Get total counts in the noise-free prompt sinogram
         counts = noise_free_prompt.sum()  # in counts
         # Compute acquisition time to reach desired counts (nb_counts)
@@ -242,7 +242,7 @@ class SinogramGeneratorSavedImages(SinogramGenerator):
 
         self.set_acquisition_time(idx)
         #
-        dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor = super().simulate_sinogram(idx)
+        dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor = super().simulate_sinogram(idx)
         #
         data_gth = read_castor_binary_file(self.obj_path[idx])
         data_gth = torch.from_numpy(data_gth)
@@ -250,7 +250,7 @@ class SinogramGeneratorSavedImages(SinogramGenerator):
         data_att = read_castor_binary_file(self.att_path[idx])
         data_att = torch.from_numpy(data_att)
         #
-        return dest_path, data_prompt, data_nfpt, data_gth, data_att, scale_factor
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor
 
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):
