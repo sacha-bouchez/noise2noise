@@ -45,11 +45,13 @@ if __name__ == "__main__":
             supervised=supervised,
             reconstruction_type='fbp',
             reconstruction_config={},
-            measurement_consistency_balance=1.0,
             physics="backward_pet_radon",
             n_splits=2,
             num_workers=1,
             objective_type='mse',
+            consensus_loss=True,
+            image_consistency=1e-1,
+            prompt_consistency=1e-1,
             seed=42
     )
 
