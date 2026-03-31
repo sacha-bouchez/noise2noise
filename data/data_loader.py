@@ -1,25 +1,15 @@
 import os
 import random
-import shutil
 import json, hashlib
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from pet_simulator import SinogramSimulatorCastor, SinogramSimulator
+from pet_simulator import SinogramSimulator
 from phantom_simulation import Phantom2DPetGenerator
 
 from tools.image.castor import read_castor_binary_file
-
-def split_sinogram(sinogram, n_splits=2):
-    """
-    Split a sinogram into several sub-sinogams.
-    """
-
-
-
-
 
 class SinogramGenerator(Dataset):
 

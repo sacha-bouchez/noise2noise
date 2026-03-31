@@ -246,8 +246,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             n_angles=self.n_angles,
             scanner_radius_mm=self.scanner_radius,
             gaussian_PSF_fwhm_mm=self.gaussian_PSF,
-            voxel_size_mm=self.voxel_size_mm,
-            device=self.device
+            voxel_size_mm=self.voxel_size_mm
         )
 
     def get_optimizer(self, learning_rate=1e-3):

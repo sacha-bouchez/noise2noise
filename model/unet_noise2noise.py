@@ -1,7 +1,8 @@
 from pytorcher.models import UNet
 from pytorcher.trainer import PytorchTrainer
 
-from pytorcher.utils import PetForwardRadon, FBPReconstructor
+from pytorcher.utils import PetForwardRadon
+from pytorcher.utils import iradon
 from noise2noise.utils.adjoint import backward_pet_radon
 
 import torch
@@ -20,18 +21,6 @@ class UnetNoise2NoisePETCommons:
     """
     Common methods for UNet Noise2Noise models.
     """
-
-    def get_reconstruction_operator(self):
-        if self.reconstruction_type.lower() == 'fbp':
-            self.reconstruction_operator = FBPReconstructor(
-                n_angles=self.n_angles,
-                scanner_radius_mm=self.scanner_radius,
-                voxel_size_mm=self.voxel_size_mm,
-                image_size=self.image_size,
-                **self.reconstruction_config
-            )
-        else:
-            raise ValueError(f"{self.reconstruction_type} reconstruction type is not allowed.")
 
     def init_pet_forward_operator(self, n_angles=None, scanner_radius_mm=None, gaussian_PSF_fwhm_mm=None, voxel_size_mm=None):
         if self.physics == 'backward_pet_radon':
@@ -70,15 +59,9 @@ class UnetNoise2NoisePETCommons:
         batch_size = x[0].shape[0]
         x = torch.stack(x, dim=0) # (n_sinos, B, C, H, W)
         #
-        x = x.view(n_splits * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (n_sinos*B, C, H, W)
-
-        # Compute out_size base on scanner radius and voxel size to ensure that the reconstructed image fits within the circular FOV
-        if not hasattr(self, 'reconstruction_operator'):
-            self.get_reconstruction_operator()
+        theta = torch.linspace(0, torch.pi, self.n_angles, device=x.device)
+        x_recon = iradon(x, theta=theta, output_size=self.image_size[-1], filter='ramp', circle=False)  # (n_sinos*B, C, H, W)
         #
-        x_recon = self.reconstruction_operator.forward(x, **kwargs)  # (n_sinos*B, C, H, W)
-        #
-        x_recon = x_recon.view(n_splits, batch_size, x_recon.shape[1], x_recon.shape[2], x_recon.shape[3])  # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
 
@@ -240,8 +223,6 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         #
         if self.input_domain == 'photon' and self.output_domain == 'image' and not hasattr(self, 'forward_pet_radon_operator'):
             self.init_pet_forward_operator()
-        if not hasattr(self, 'reconstruction_operator'):
-            self.get_reconstruction_operator()
 
 
     def adjoint(self, y, image_size=None, voxel_size_mm=None, attenuation_map=None, scale=None):
