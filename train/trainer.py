@@ -155,7 +155,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             [ 'PSNR', { 'name': 'val_prompt_im_psnr'} ],
             [ 'SSIM', { 'name': 'val_prompt_im_ssim'} ],
             [ 'PSNR', { 'name': 'n2n_psnr'} ],
-            [ 'LPIPS', { 'name': 'im_lpips'} ],
+            # [ 'LPIPS', { 'name': 'im_lpips'} ],
         ])
         if self.unet_output_domain == 'image':
             metrics.append( [ 'SSIM', { 'name': 'n2n_ssim'} ] )
