@@ -71,7 +71,7 @@ class SingleImageInferencePipeline(PytorchTrainer):
 
     def set_acquisition_time(self, nb_counts=3e6):
         # Simulate true counts
-        _ , _, _, noise_free_prompt = self.sinogram_simulator.get_nfpt(self.img, self.img_att)
+        _ , _, _, noise_free_prompt, _ = self.sinogram_simulator.get_nfpt(self.img, self.img_att)
         # Get total counts in the noise-free prompt sinogram
         counts = noise_free_prompt.sum()  # in counts
         # Compute acquisition time to reach desired counts (nb_counts)

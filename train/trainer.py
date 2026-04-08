@@ -299,8 +299,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         elif type == 'hubert':
             objective = torch.nn.SmoothL1Loss(beta=1.0)
         elif type == 'poisson':
-            objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='none')
-        # NOTE reduction is set to none to allow for background masking.
+            objective = torch.nn.PoissonNLLLoss(log_input=False, full=False)
         #
         self.model.loss_type = type # inform model about loss type for potential post-processing
         #
@@ -409,7 +408,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             loss = self.computes_masked_loss(loss, mask)
         return loss
     
-    def compute_loss(self, output, target, mask=None, attenuation_map=None, scale=None):
+    def compute_loss(self, output, target, attenuation_map=None, scale=None):
 
         if self.unet_input_domain == self.unet_output_domain == 'photon':
             loss = self.compute_count_loss(output, target)
@@ -431,15 +430,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 loss = self.compute_count_loss(projected_output, target)
             else:
                 loss = self.objective(output, target)
-
-        # Apply reduction on loss
-        if mask is None:
-            mask = torch.ones_like(loss)
-        loss = self.computes_masked_loss(loss, mask)
         #
         return loss
     
-    def compute_loss_addons(self, outputs, prompt, mask_image=None, mask_sino=None, attenuation_map=None, scale=None):
+    def compute_loss_addons(self, outputs, prompt, attenuation_map=None, scale=None):
         loss_addons = {}
         #
         # remove consistency term from loss if consensus_loss is True
@@ -451,10 +445,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 #
                 
                 if self.unet_output_domain == 'photon':
-                    consensus_loss_ij = (1 / self.n_splits **2) * self.compute_count_loss(output_i, output_j, mask_sino)
+                    consensus_loss_ij = (1 / self.n_splits **2) * self.compute_count_loss(output_i, output_j)
                 else:
-                    consensus_loss_ij = (1 / self.n_splits **2) * F.mse_loss(output_i, output_j, reduction='none')
-                    consensus_loss_ij = self.computes_masked_loss(consensus_loss_ij, mask_image)
+                    consensus_loss_ij = (1 / self.n_splits **2) * self.objective(output_i, output_j)
                 #
                 loss_addons[f'consensus_loss'] -= consensus_loss_ij
         #
@@ -464,8 +457,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         # add image consistency
         if self.image_consistency > 0:
             # unet output domain has to be image
-            loss_image_consistency = self.image_consistency * F.mse_loss(z, self.model.reconstruction(prompt, scale=scale * self.n_splits), reduction='none')
-            loss_image_consistency = self.computes_masked_loss(loss_image_consistency, mask=mask_image)
+            loss_image_consistency = self.image_consistency * self.objective(z, self.model.reconstruction(prompt, scale=scale))
             #
             loss_addons[f'image_consistency_loss'] = loss_image_consistency
         #
@@ -479,7 +471,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     forward_operator_type=self.forward_operator_type
                 )
             #
-            loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z, prompt, mask=mask_sino)
+            loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z, prompt)
             #
             loss_addons[f'prompt_consistency_loss'] = loss_prompt_consistency
 
@@ -559,14 +551,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     output_i = self.model(
                         x_i,
                         attenuation_map=att,
-                        scale=scale
+                        scale=scale,
+                        mask=mask
                     )
                     if self.supervised:
                         loss_target = target
                     else:
                         loss_target = x_j
                     #
-                    loss_ij = self.compute_loss(output=output_i, target=loss_target, mask=mask, attenuation_map=att, scale=scale)
+                    loss_ij = self.compute_loss(output=output_i, target=loss_target, attenuation_map=att, scale=scale)
                     # We only update n2n_ metrics and loss here
                     metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
                     self.update_metrics(normalize_batch(target), normalize_batch(output_i), metric_names=metrics_to_update)
@@ -580,8 +573,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 loss_addons = self.compute_loss_addons(
                     outputs=split_outputs,
                     prompt=prompt,
-                    mask_image=(target > 0).float(),
-                    mask_sino=(att_sino > 0).float(),
                     attenuation_map=att,
                     scale=scale * self.n_splits
                 )
@@ -637,13 +628,19 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         if self.unet_input_domain == 'image':
                             x = [self.model.reconstruction(s, scale=scale) for s in x]
 
-                        # Denoise
+                        # Create mask
+                        if self.unet_input_domain == 'image':
+                            mask = (gth > 0).float()
+                        else:
+                            mask = (att_sino > 0).float()
 
+                        # Denoise
                         if self.supervised:
                             splits_infered = self.model(
                                 torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
                                 attenuation_map=att,
                                 scale=scale,
+                                mask=mask
                             )
                             splits_infered = splits_infered.chunk(1, dim=0) # dummy chunk to have same format as unsupervised case for easier code reuse
                         else:
@@ -659,11 +656,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         else:
                             target = target
 
-                        # Create mask
-                        if self.unet_output_domain == 'image':
-                            mask = (gth > 0).float()
-                        else:
-                            mask = (att_sino > 0).float()
+
                         #
                         val_split_losses = []
                         for (i, j) in pairwise_permutations:
@@ -673,9 +666,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             out_i = splits_infered[i]
                             # Loss computation for pair (i, j)
                             if not self.supervised:
-                                val_loss = self.compute_loss(output=out_i, target=x_j, mask=mask, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(output=out_i, target=x_j, attenuation_map=att, scale=scale)
                             else:
-                                val_loss = self.compute_loss(output=out_i, target=target, mask=mask, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(output=out_i, target=target, attenuation_map=att, scale=scale)
                             val_split_losses.append(val_loss)
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
@@ -685,8 +678,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         val_loss_addons = self.compute_loss_addons(
                             outputs=splits_infered,
                             prompt=prompt,
-                            mask_image=(gth > 0).float(),
-                            mask_sino=(att_sino > 0).float(),
                             attenuation_map=att,
                             scale=scale * self.n_splits
                         )
@@ -711,7 +702,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     metric.reset_states()
 
             # perform evaluation on brain phantom and log results as artifact for visual inspection of model performance evolution during training
-            for batch_idx, (path, prompt, nfpt, gth, att, _, scale) in enumerate(self.dataset_val_specific):
+            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.dataset_val_specific):
 
                 print(f'Inference on brain phantom for visual inspection of model performance evolution during training, batch {batch_idx+1}/{len(self.dataset_val_specific)} ...')
 

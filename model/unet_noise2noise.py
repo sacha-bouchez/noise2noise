@@ -122,7 +122,7 @@ class UnetNoise2NoisePETCommons:
 
         return splits
     
-    def forward_inference(self, x, scale, attenuation_map=None, seed=None, monte_carlo_steps=1, split=True):
+    def forward_inference(self, x, scale, attenuation_map=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
         """
         Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
         The splitting process has some randomness; set seed for reproducibility.
@@ -131,6 +131,7 @@ class UnetNoise2NoisePETCommons:
         :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
         :param scale: (B,) scale factor to be applied to sinogram before reconstruction.
         :param seed: random seed for splitting
+        :param mask: (B, 1, H, W) mask tensor to apply to the output
         :param monte_carlo_steps: number of stochastic passes to average
         :return: (B, C, H, W) output image tensor
         """
@@ -158,7 +159,7 @@ class UnetNoise2NoisePETCommons:
                 splits = self.reconstruction(splits, scale=scale, **self.reconstruction_config)  # (B * n_splits, C, H, W)
 
             # Denoise
-            splits_denoised = self.forward(splits, attenuation_map=attenuation_map, scale=scale)  # (B * n_splits, C, H, W)
+            splits_denoised = self.forward(splits, attenuation_map=attenuation_map, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
 
             # Expand splits to have (n_splits, B, C, H, W)
             splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)
@@ -270,7 +271,7 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         else:
             return super().compute_skip_connection(x)
 
-    def forward(self, x, attenuation_map=None, scale=None):
+    def forward(self, x, attenuation_map=None, scale=None, mask=None):
         """
         :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
                   Even if input_domain is 'photon', one can provide a pre-computed adjoint image as input to save time during inference and training.
@@ -294,6 +295,9 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         #
         if self.output_domain == 'image' and (output.shape[-2], output.shape[-1]) != self.image_size:
             output = torch.nn.functional.interpolate(output, size=self.image_size, mode='bilinear', align_corners=False)
+        #
+        if mask is not None:
+            output = output * mask
         return output
     
 class InferenceUNetNoise2Noise(nn.Module, UnetNoise2NoisePETCommons, PytorchTrainer):
