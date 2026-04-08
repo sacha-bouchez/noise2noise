@@ -61,6 +61,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
             consensus_loss=False, # Either to use consensus loss from 10.48550/arXiv.1906.03639 or not.
             image_consistency=0.0, # balance for image consistency loss, which enforces the average of split outputs to be close to the reconstruction from the prompt.
             prompt_consistency=0.0, # balance for prompt consistency loss, which enforces the projected output to be close to the prompt.
+            prior=None, # either 'TV' for total variation or 'Gibbs' for Gibbs prior, or None for no prior.
+            prior_weight=0.0, # balance for the prior loss
             seed=42
         ):
         self.dest_path = dest_path
@@ -110,17 +112,20 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.consensus_loss = consensus_loss
         if self.consensus_loss:
             assert not self.supervised, "Consensus loss is only applicable for self-supervised noise2noise training."
-            assert self.objective_type.lower() in ['mse', 'mse_anscombe'], "Consensus loss is only applicable for MSE-based objectives."
         
         self.image_consistency = image_consistency
         if self.image_consistency > 0:
             assert not self.supervised, "Image consistency loss is only applicable for self-supervised noise2noise training."
             assert self.unet_output_domain == 'image', "Image consistency loss can only be applied when output domain is image."
-            assert self.objective_type.lower() in ['mse', 'mse_anscombe'], "Image consistency loss can only be applied for MSE-based objective."
 
         self.prompt_consistency = prompt_consistency
         if self.prompt_consistency > 0:
             assert not self.supervised, "Prompt consistency loss is only applicable for self-supervised noise2noise training."
+
+        self.prior = prior.lower() if prior is not None else None
+        self.prior_weight = prior_weight
+        if self.prior is not None:
+            assert prior in ['tv', 'gibbs'], "Currently only 'TV' and 'Gibbs' priors are supported."
         
         self.forward_operator_type = 'radon'
         self.seed = seed
@@ -136,7 +141,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         super(Noise2NoiseTrainer, self).__init__()
         #
         if (self.unet_input_domain == 'photon' and self.unet_output_domain == 'image') or \
-            (self.unet_input_domain == 'image' and self.image_consistency > 0):
+            (self.unet_input_domain == 'image' and self.image_consistency > 0) or \
+            (self.prompt_consistency > 0):
             self.get_pet_forward_operator() # initialize forward operator for potential use in photon to image domain conversion and measurement consistency loss
 
     def get_metrics(self, metrics=[]):
@@ -448,7 +454,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 #
                 loss_addons[f'consensus_loss'] -= consensus_loss_ij
         #
-        if self.prompt_consistency > 0 or self.image_consistency > 0:
+        if self.prompt_consistency > 0 or self.image_consistency > 0 or (self.prior is not None and self.prior_weight > 0):
             z = torch.stack(outputs, dim=0) # (n_splits, B, C, H, W)
             z = torch.mean(z, dim=0) # (B, C, H, W)
         # add image consistency
@@ -465,13 +471,20 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 z = self.pet_forward_operator(
                     z,
                     attenuation_map=attenuation_map,
-                    scale=scale * self.n_splits,
+                    scale=scale,
                     forward_operator_type=self.forward_operator_type
                 )
             #
             loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z, prompt, mask=mask_sino)
             #
             loss_addons[f'prompt_consistency_loss'] = loss_prompt_consistency
+
+        if self.prior is not None and self.prior_weight > 0:
+            if self.prior == 'tv':
+                prior_loss = self.prior_weight * total_variation(z)
+            elif self.prior == 'gibbs':
+                prior_loss = self.prior_weight * gibbs(z)
+            loss_addons[f'{self.prior}_prior_loss'] = prior_loss
 
         return loss_addons
         
@@ -566,8 +579,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     mask_image=(target > 0).float(),
                     mask_sino=(att_sino > 0).float(),
                     attenuation_map=att,
-                    scale=scale
+                    scale=scale * self.n_splits
                 )
+                # 
                 loss = loss + sum(loss_addons.values())
                 # Update loss
                 self.update_loss(loss)
@@ -670,7 +684,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             mask_image=(gth > 0).float(),
                             mask_sino=(att_sino > 0).float(),
                             attenuation_map=att,
-                            scale=scale
+                            scale=scale * self.n_splits
                         )
                         val_loss = val_loss + sum(val_loss_addons.values())
                         #

@@ -13,10 +13,10 @@ if __name__ == "__main__":
 
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
-            dataset_train_size=8192,
-            dataset_val_size=2048,
+            dataset_train_size=4096,
+            dataset_val_size=0,
             val_freq=1,
-            n_epochs=25,
+            n_epochs=10,
             batch_size=16,
             shuffle=True,
             simulator_config={
@@ -29,16 +29,18 @@ if __name__ == "__main__":
                 'scatter_component' : 0.36,
                 'random_component' : 0.50
             },
-            learning_rate=1e-4,
+            optimizer_config={
+                'lr': 5e-5
+            },
             unet_config = {
                 'conv_layer_type': 'Conv2d',
                 'n_levels': 4,
                 'global_conv': 32,
-                'residual_conv': True,
+                'residual_conv': False,
                 'physics_mode': 'pre_inverse',
-                'residual': False,
+                'residual': True,
                 'out_act': 'softplus',
-                'init': 'dirac'
+                'init': 'none'
             },
             unet_input_domain=unet_input_domain,
             unet_output_domain=unet_output_domain,
@@ -50,8 +52,11 @@ if __name__ == "__main__":
             num_workers=1,
             objective_type='mse',
             consensus_loss=True,
-            image_consistency=1e-1,
-            prompt_consistency=1e-1,
+            image_consistency=0.0, #5e-1
+            prompt_consistency=0.0,
+            prior='tv',
+            prior_weight=0.0,
+            fourier_weight=0.0,
             seed=42
     )
 
