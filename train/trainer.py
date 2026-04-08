@@ -105,7 +105,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         unet_config.update({'n_splits': n_splits})
         #
         if (self.unet_output_domain == self.unet_input_domain == 'image') or (self.supervised and unet_output_domain == 'image'):
-            assert objective_type.lower() in ['mse'], "When both input and output domain is 'image', only 'MSE' is supported."
+            assert objective_type.lower() in ['mse', 'l1', 'hubert'], "When both input and output domain is 'image', only 'MSE' is supported."
         else:
             assert objective_type.lower() in ['poisson', 'mse', 'mse_anscombe'], "When output domain is 'photon', only 'Poisson' and 'MSE' are supported."
         self.objective_type = objective_type
@@ -293,7 +293,11 @@ class Noise2NoiseTrainer(PytorchTrainer):
     def get_objective(self):
         type = self.objective_type.lower()
         if 'mse' in type:
-            objective = torch.nn.MSELoss(reduction='none')
+            objective = torch.nn.MSELoss()
+        elif type == 'l1':
+            objective = torch.nn.L1Loss()
+        elif type == 'hubert':
+            objective = torch.nn.SmoothL1Loss(beta=1.0)
         elif type == 'poisson':
             objective = torch.nn.PoissonNLLLoss(log_input=False, full=False, reduction='none')
         # NOTE reduction is set to none to allow for background masking.
