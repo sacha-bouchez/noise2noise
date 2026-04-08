@@ -766,15 +766,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 mlflow.log_dict(metrics, f'brain_phantom/metrics_epoch_{epoch+1}.json')
                 mlflow.log_figure(fig, f'brain_phantom/reconstruction_epoch_{epoch+1}.png')
 
-            # metric monitoring
-            m_dict = {**m_dict_train, **m_dict_val}
-            monitored_metrics = [ m for m in list(m_dict.keys()) if (m.startswith('val_loss_') and 'reg_' not in m) or m.startswith('val_im_') ]
-            for metric_name in monitored_metrics:
-                if 'loss' in metric_name:
-                    mode = 'min'
-                else:
-                    mode = 'max'
-                self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name], mode=mode)
+            # # metric monitoring
+            # m_dict = {**m_dict_train, **m_dict_val}
+            # monitored_metrics = [ m for m in list(m_dict.keys()) if (m.startswith('val_loss_') and 'reg_' not in m) or m.startswith('val_im_') ]
+            # for metric_name in monitored_metrics:
+            #     if 'loss' in metric_name:
+            #         mode = 'min'
+            #     else:
+            #         mode = 'max'
+            #     self.mlflow_metric_monitoring(epoch, metric_name, m_dict[metric_name], mode=mode)
 
             # log metrics
             for metric_name, metric_value in m_dict.items():
@@ -788,8 +788,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         # log final model
         mlflow.pytorch.log_model(self.model, artifact_path="final_model", registered_model_name=self.model_name)
 
-        # log final best models
-        for metric_name in monitored_metrics:
-            # retrieved best model checkpoint from artifact
-            self.load_checkpoint(artifact_path=f"best_model_{metric_name}")
-            mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"{self.model_name}_{metric_name}")
+        # # log final best models
+        # for metric_name in monitored_metrics:
+        #     # retrieved best model checkpoint from artifact
+        #     self.load_checkpoint(artifact_path=f"best_model_{metric_name}")
+        #     mlflow.pytorch.log_model(self.model, artifact_path=f"best_model_{metric_name}", registered_model_name=f"{self.model_name}_{metric_name}")
