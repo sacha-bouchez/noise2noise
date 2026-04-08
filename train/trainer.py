@@ -769,7 +769,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 mlflow.log_figure(fig, f'brain_phantom/reconstruction_epoch_{epoch+1}.png')
 
             # # metric monitoring
-            # m_dict = {**m_dict_train, **m_dict_val}
+            m_dict = {**m_dict_train, **m_dict_val}
             # monitored_metrics = [ m for m in list(m_dict.keys()) if (m.startswith('val_loss_') and 'reg_' not in m) or m.startswith('val_im_') ]
             # for metric_name in monitored_metrics:
             #     if 'loss' in metric_name:
