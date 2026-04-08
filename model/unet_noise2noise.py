@@ -279,11 +279,12 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         :param attenuation_map: (B, C, H, W) attenuation map to be used for the adjoint operator. If None, no attenuation will be applied.
         :param scale: (B,) scale factor to be applied to sinogram before reconstruction. This is typically acquisition_time * np.log(2) / half_life, but can be set to 1 if the input sinogram has already been scaled accordingly. If None, no scaling will be applied.
         """
-        #
+        # x may be stacked splits, attenuation_map may need to be repeated
+        if attenuation_map is not None and attenuation_map.shape[0] != x.shape[0]:
+            attenuation_map = torch.repeat_interleave(attenuation_map, repeats=self.n_splits, dim=0)
         if self.input_domain == 'photon' and self.output_domain == 'image' and \
-        self.physics is not None and isinstance(self.image_size, tuple) and \
-        self.physics_mode == 'pre_inverse':
-            # Ensure that we only apply the pre-inverse when the input is a sinogram
+           self.physics is not None and isinstance(self.image_size, tuple) and \
+           self.physics_mode == 'pre_inverse':
             x = self.adjoint(x, image_size=self.image_size, attenuation_map=attenuation_map, scale=scale)
         #
         output = super().forward(x, attenuation_map=attenuation_map, scale=scale)
