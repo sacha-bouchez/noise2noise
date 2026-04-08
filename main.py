@@ -56,7 +56,6 @@ if __name__ == "__main__":
             prompt_consistency=0.0,
             prior='tv',
             prior_weight=0.0,
-            fourier_weight=0.0,
             seed=42
     )
 
