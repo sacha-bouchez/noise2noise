@@ -586,6 +586,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+                # log batch loss
+                mlflow.log_metric(f'batch_loss_{self.objective_type.lower()}', loss.item(), step=epoch * len(self.loader_train) + batch_idx)
                 #
                 m_dict_train = {metric.name: metric.result() for metric in self.metrics if metric.name.startswith('n2n_') or metric.name.startswith('loss_')}
                 print(f'Epoch [{epoch+1}/{self.n_epochs}], Train,  Step [{batch_idx+1}/{len(self.loader_train)}]', f"Metrics : {m_dict_train}")
