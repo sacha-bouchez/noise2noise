@@ -17,6 +17,8 @@ from pytorcher.utils.prior import *
 from tools.image.metrics import PSNR, SSIM
 from tools.image.processing import reverse_grayscale
 
+import matplotlib.pyplot as plt
+
 def anscombe(x):
     return 2 * torch.sqrt( x + (3/8) )
 
@@ -710,11 +712,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 # move data to device
                 prompt = prompt.to(self.device).float().unsqueeze(0) # add batch dimension
+                nfpt = nfpt.to(self.device).float().unsqueeze(0) # add batch dimension
                 scale = torch.tensor(scale).to(self.device).float().unsqueeze(0) # add batch dimension
                 att = att.to(self.device).float().unsqueeze(0) # add batch dimension
 
-                #
-                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=10, split=True)
+                # Denoised reconstruction from prompt
+                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=1, split=True)
                 recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
 
                 # Compute metrics
@@ -724,13 +727,44 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     'psnr': PSNR_denoised.item(),
                     'ssim': SSIM_denoised.item()
                 }
+                #
+                reconstructions = {
+                    'denoised': recon_noise2noise
+                }
 
-                # Apply LUT on reconstructed image
-                recon_noise2noise = reverse_grayscale(recon_noise2noise)
+                for input_type, input in zip(['nfpt', 'prompt'], [nfpt, prompt]):
+                    recon_input = self.model.reconstruction(input, scale=scale).to('cpu').squeeze().detach().numpy().astype(np.float32)
+                    PSNR_input = PSNR(I=gth, K=recon_input, mask=gth>0)
+                    SSIM_input = SSIM(img1=gth, img2=recon_input, mask=gth>0)
+                    metrics[f'psnr_{input_type}'] = PSNR_input.item()
+                    metrics[f'ssim_{input_type}'] = SSIM_input.item()
+                    reconstructions[f'{input_type}'] = recon_input
 
+                with plt.style.context('ggplot'):
+                    # create matplotlib figure
+                    fig, ax = plt.subplots(1,3, figsize=(10,3))
+                    # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
+                    ax[1].imshow(recon_noise2noise, cmap='gray_r')
+                    ax[1].set_title(f'Inference\nreconstruction')
+                    ax[1].axis('off')
+                    plt.colorbar(ax[1].images[0], ax=ax[1], fraction=0.046, pad=0.04)
+                    ax[1].annotate(f'PSNR: {PSNR_denoised:.2f} dB,\n SSIM: {SSIM_denoised:.4f}', xy=(0.05,0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
+
+                    ax[2].imshow(reconstructions['nfpt'], cmap='gray_r')
+                    ax[2].set_title(('Noise-free\nreconstruction'))
+                    ax[2].axis('off')
+                    plt.colorbar(ax[2].images[0], ax=ax[2], fraction=0.046, pad=0.04)
+                    ax[2].annotate(f'PSNR: {metrics["psnr_nfpt"]:.2f} dB,\n SSIM: {metrics["ssim_nfpt"]:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
+
+                    ax[0].imshow(reconstructions['prompt'], cmap='gray_r')
+                    ax[0].set_title(f'Prompt\nreconstruction')
+                    ax[0].axis('off')
+                    plt.colorbar(ax[0].images[0], ax=ax[0], fraction=0.046, pad=0.04)
+                    ax[0].annotate(f'PSNR: {metrics["psnr_prompt"]:.2f} dB,\n SSIM: {metrics["ssim_prompt"]:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
+                plt.close(fig)
                 #
                 mlflow.log_dict(metrics, f'brain_phantom/metrics_epoch_{epoch+1}.json')
-                mlflow.log_image(recon_noise2noise, f'brain_phantom/denoised_epoch_{epoch+1}.png')
+                mlflow.log_figure(fig, f'brain_phantom/reconstruction_epoch_{epoch+1}.png')
 
             # metric monitoring
             m_dict = {**m_dict_train, **m_dict_val}
