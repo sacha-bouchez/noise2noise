@@ -547,8 +547,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 if self.unet_input_domain == 'image':
                     mask = (target > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
                 else:
-                    mask = (att_sino > 0).float() # in photon domain, we compute loss only on pixels with non-zero attenuation, as these are the pixels that contribute to the sinogram and can be learned from.
-                    # TODO 1.02 threshold
+                    mask = (att_sino > 1.02).float() # in photon domain, we compute loss only on pixels with non-zero attenuation, as these are the pixels that contribute to the sinogram and can be learned from.
 
                 # Denoise and compute loss on all pairs
                 for (i, j) in pairwise_permutations:
