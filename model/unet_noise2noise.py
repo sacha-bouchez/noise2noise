@@ -52,11 +52,14 @@ class UnetNoise2NoisePETCommons:
         else:
             return None
 
-    def reconstruction(self, *x, scale=None, **kwargs):
+    def reconstruction(self, *x, scale=None, corr=None, **kwargs):
+        #
+        if corr is not None:
+            x = [ xx - corr for xx in x ]  # list of (B, C, H, W)
+        #
         if scale is not None:
             x = [ xx / scale[i] for i, xx in enumerate(x) ]  # list of (B, C, H, W)
-        n_splits = len(x)
-        batch_size = x[0].shape[0]
+
         x = torch.stack(x, dim=0) # (n_sinos, B, C, H, W)
         #
         theta = torch.linspace(0, torch.pi, self.n_angles, device=x.device)
@@ -122,7 +125,7 @@ class UnetNoise2NoisePETCommons:
 
         return splits
     
-    def forward_inference(self, x, scale, attenuation_map=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
+    def forward_inference(self, x, scale, attenuation_map=None, corr=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
         """
         Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
         The splitting process has some randomness; set seed for reproducibility.
@@ -156,7 +159,7 @@ class UnetNoise2NoisePETCommons:
 
             # Apply reconstruction if needed
             if self.unet_input_domain == 'image':
-                splits = self.reconstruction(splits, scale=scale, **self.reconstruction_config)  # (B * n_splits, C, H, W)
+                splits = self.reconstruction(splits, scale=scale, corr=corr)  # (B * n_splits, C, H, W)
 
             # Denoise
             splits_denoised = self.forward(splits, attenuation_map=attenuation_map, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
@@ -166,7 +169,7 @@ class UnetNoise2NoisePETCommons:
 
             # Apply reconstruction if needed and average outputs
             if self.unet_output_domain == 'photon':
-                output = self.reconstruction(*splits_denoised, scale=scale, **self.reconstruction_config) # (B, C, H, W)
+                output = self.reconstruction(*splits_denoised, scale=scale, corr=corr) # (B, C, H, W)
             else:
                 splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
                 output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)

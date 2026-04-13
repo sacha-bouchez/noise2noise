@@ -27,6 +27,7 @@ class SinogramGenerator(Dataset):
             acquisition_time=None,
             scatter_component=0.36,
             random_component=0.50,
+            scatter_sigma=2.0,
             gaussian_PSF=4, # in mm
             seed=None):
         self.dest_path = dest_path
@@ -44,6 +45,7 @@ class SinogramGenerator(Dataset):
         self.acquisition_time = acquisition_time
         self.scatter_component = scatter_component
         self.random_component = random_component
+        self.scatter_sigma = scatter_sigma
         self.gaussian_PSF = gaussian_PSF
         #
         self.hashcode = self.get_generator_hashcode()
@@ -57,6 +59,7 @@ class SinogramGenerator(Dataset):
             scatter_component=scatter_component,
             random_component=random_component,
             gaussian_PSF=gaussian_PSF,
+            scatter_sigma=scatter_sigma,
             half_life=half_life,
             seed=seed
         )
@@ -169,23 +172,28 @@ class SinogramGenerator(Dataset):
         else:
             data_att_sino = None
         #
-        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor
+        randoms = read_castor_binary_file(f'{dest_path}/simu/simu_rd.s.hdr')
+        scatter = read_castor_binary_file(f'{dest_path}/simu/simu_sc.s.hdr')
+        corr = randoms + scatter
+        data_corr = torch.from_numpy(corr)
+        #
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, data_corr, scale_factor
 
 
     def generate_sample(self, idx):
 
         # Simulate sinogram
-        dest_path, prompt, nfpt, gth, att, att_sino, scale_factor = self.simulate_sinogram(idx)
+        dest_path, prompt, nfpt, gth, att, att_sino, data_corr, scale_factor = self.simulate_sinogram(idx)
 
-        return dest_path, prompt, nfpt, gth, att, att_sino, scale_factor
+        return dest_path, prompt, nfpt, gth, att, att_sino, data_corr, scale_factor
 
     def __getitem__(self, idx):
         """
         Output shape : (1, H, W)
         """
 
-        dest_path, prompt, nfpt, gth, att, att_sino, scale = self.generate_sample(idx)
-        return dest_path, prompt, nfpt, gth, att, att_sino, scale
+        dest_path, prompt, nfpt, gth, att, att_sino, data_corr, scale_factor = self.generate_sample(idx)
+        return dest_path, prompt, nfpt, gth, att, att_sino, data_corr, scale_factor
 
 class SinogramGeneratorSavedImages(SinogramGenerator):
     """
@@ -232,7 +240,7 @@ class SinogramGeneratorSavedImages(SinogramGenerator):
 
         self.set_acquisition_time(idx)
         #
-        dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor = super().simulate_sinogram(idx)
+        dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, data_corr, scale_factor = super().simulate_sinogram(idx)
         #
         data_gth = read_castor_binary_file(self.obj_path[idx])
         data_gth = torch.from_numpy(data_gth)
@@ -240,7 +248,7 @@ class SinogramGeneratorSavedImages(SinogramGenerator):
         data_att = read_castor_binary_file(self.att_path[idx])
         data_att = torch.from_numpy(data_att)
         #
-        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, scale_factor
+        return dest_path, data_prompt, data_nfpt, data_gth, data_att, data_att_sino, data_corr, scale_factor
 
 
 class SinogramGeneratorReconstructionTest(SinogramGenerator):

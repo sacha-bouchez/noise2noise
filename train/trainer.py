@@ -103,6 +103,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.reconstruction_type = reconstruction_type
         unet_config.update({'reconstruction_type': self.reconstruction_type})
         self.reconstruction_config = reconstruction_config
+        unet_config.update({'reconstruction_config': self.reconstruction_config})
+        #
         self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
         unet_config.update({'n_splits': n_splits})
         #
@@ -328,7 +330,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         if self.unet_output_domain == self.unet_input_domain:
             self.model.eval()
             with torch.no_grad():
-                for batch_idx, (path, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.loader_val):
+                for batch_idx, (path, prompt, nfpt, gth, att, att_sino, corr, scale) in enumerate(self.loader_val):
 
                     print(f'Computing reference metrics, batch {batch_idx+1}/{len(self.loader_val)} ...')
 
@@ -337,15 +339,16 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     nfpt = nfpt.to(self.device).float()
                     gth = gth.to(self.device).float()
                     scale = scale.to(self.device).float()
+                    corr = corr.to(self.device).float()
 
                     # reconstruction from noise-free sinogram
-                    recon_nfpt = self.model.reconstruction(nfpt, scale=scale)
+                    recon_nfpt = self.model.reconstruction(nfpt, scale=scale, corr=corr)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'nfpt' in m.name ]
                     self.update_metrics(normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
 
                     # reconstruction from prompt sinogram
-                    recon_prompt = self.model.reconstruction(prompt, scale=scale)
+                    recon_prompt = self.model.reconstruction(prompt, scale=scale, corr=corr)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'prompt' in m.name ]
                     self.update_metrics(normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
@@ -435,7 +438,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         #
         return loss
     
-    def compute_loss_addons(self, outputs, prompt, attenuation_map=None, scale=None):
+    def compute_loss_addons(self, outputs, prompt, attenuation_map=None, scale=None, corr=None):
         loss_addons = {}
         #
         # remove consistency term from loss if consensus_loss is True
@@ -499,7 +502,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             m_dict_train = {}
             # TRAIN
             self.model.train()
-            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.loader_train):
+            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, corr, scale) in enumerate(self.loader_train):
 
                 # Set target for taské
                 if self.unet_output_domain == 'image':
@@ -514,6 +517,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 scale = scale.to(self.device).float()
                 att = att.to(self.device).float()
                 att_sino = att_sino.to(self.device).float()
+                corr = corr.to(self.device).float()
                 #
                 # split prompt with multinomial statistics
                 split_losses = []
@@ -522,6 +526,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     splitted_prompts = self.model.split_prompt(prompt, mode='multinomial')
                     pairwise_permutations = list(itertools.permutations(range(self.n_splits), 2))
                     scale = scale / self.n_splits
+                    corr = corr / self.n_splits
                 else:
                     # In supervised setting, we force n_splits = 1 and use the prompt as is with the ground truth as target
                     splitted_prompts = [prompt]
@@ -529,7 +534,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 #
                 # Apply reconstruction if needed
                 if self.unet_input_domain == 'image':
-                    x = [self.model.reconstruction(s, scale=scale) for s in splitted_prompts]
+                    x = [self.model.reconstruction(s, scale=scale, corr=corr) for s in splitted_prompts]
                 else:
                     x = splitted_prompts
 
@@ -576,7 +581,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     outputs=split_outputs,
                     prompt=prompt,
                     attenuation_map=att,
-                    scale=scale * self.n_splits
+                    scale=scale * self.n_splits,
+                    corr=corr * self.n_splits
                 )
                 # 
                 loss = loss + sum(loss_addons.values())
@@ -604,7 +610,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 # run model in evaluation mode and avoid building computation graph
                 self.model.eval()
                 with torch.no_grad():
-                    for batch_idx, (_, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.loader_val):
+                    for batch_idx, (_, prompt, nfpt, gth, att, att_sino, corr, scale) in enumerate(self.loader_val):
 
                         # set target for task
                         if self.unet_output_domain == 'image':
@@ -619,18 +625,20 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         scale = scale.to(self.device).float()
                         att = att.to(self.device).float()
                         att_sino = att_sino.to(self.device).float()
+                        corr = corr.to(self.device).float()
                         #
                         if not self.supervised:
                             # Split data with multinomial statistics. This is done to match training data distribution
                             x = self.model.split_prompt(prompt, mode='multinomial')
                             #
                             scale = scale / self.n_splits
+                            corr = corr / self.n_splits
                         else:
                             x = [prompt, ]
 
                         # Apply reconstruction if needed
                         if self.unet_input_domain == 'image':
-                            x = [self.model.reconstruction(s, scale=scale) for s in x]
+                            x = [self.model.reconstruction(s, scale=scale, corr=corr) for s in x]
 
                         # Create mask
                         if self.unet_input_domain == 'image':
@@ -683,14 +691,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             outputs=splits_infered,
                             prompt=prompt,
                             attenuation_map=att,
-                            scale=scale * self.n_splits
+                            scale=scale * self.n_splits,
+                            corr=corr * self.n_splits
                         )
                         val_loss = val_loss + sum(val_loss_addons.values())
                         #
                         self.update_loss(val_loss)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
-                            output = self.model.reconstruction(*splits_infered, scale=scale) # (B, C, H, W)
+                            output = self.model.reconstruction(*splits_infered, scale=scale, corr=corr) # (B, C, H, W)
                         else:
                             splits_infered = torch.stack(splits_infered, dim=0)  # (n_splits, B, C, H, W)
                             output = torch.mean(splits_infered, dim=0)  # (B, C, H, W)
@@ -706,7 +715,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     metric.reset_states()
 
             # perform evaluation on brain phantom and log results as artifact for visual inspection of model performance evolution during training
-            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, scale) in enumerate(self.dataset_val_specific):
+            for batch_idx, (path, prompt, nfpt, gth, att, att_sino, corr, scale) in enumerate(self.dataset_val_specific):
 
                 print(f'Inference on brain phantom for visual inspection of model performance evolution during training, batch {batch_idx+1}/{len(self.dataset_val_specific)} ...')
 
@@ -717,6 +726,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 nfpt = nfpt.to(self.device).float().unsqueeze(0) # add batch dimension
                 scale = torch.tensor(scale).to(self.device).float().unsqueeze(0) # add batch dimension
                 att = att.to(self.device).float().unsqueeze(0) # add batch dimension
+                corr = corr.to(self.device).float().unsqueeze(0) # add batch dimension
 
                 # Denoised reconstruction from prompt
                 recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=1, split=True)
@@ -735,7 +745,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 }
 
                 for input_type, input in zip(['nfpt', 'prompt'], [nfpt, prompt]):
-                    recon_input = self.model.reconstruction(input, scale=scale).to('cpu').squeeze().detach().numpy().astype(np.float32)
+                    recon_input = self.model.reconstruction(input, scale=scale, corr=corr).to('cpu').squeeze().detach().numpy().astype(np.float32)
                     PSNR_input = PSNR(I=gth, K=recon_input, mask=gth>0)
                     SSIM_input = SSIM(img1=gth, img2=recon_input, mask=gth>0)
                     metrics[f'psnr_{input_type}'] = PSNR_input.item()
