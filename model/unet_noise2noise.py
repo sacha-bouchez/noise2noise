@@ -175,6 +175,11 @@ class UnetNoise2NoisePETCommons:
         # Average over monte carlo steps
         outputs = outputs / monte_carlo_steps # (B, C, H, W)
         return outputs
+    
+    def del_unpickable_attributes(self):
+        # Remove attributes that cannot be pickled (e.g. for MLFlow model registering)
+        if hasattr(self, 'forward_pet_radon_operator'):
+            del self.forward_pet_radon_operator
 
 class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
 
