@@ -1,15 +1,9 @@
 from pytorcher.models import UNet
-from pytorcher.trainer import PytorchTrainer
 
 from pytorcher.utils import PetForwardRadon
-from pytorcher.utils import iradon
-from noise2noise.utils.adjoint import backward_pet_radon
 
 import torch
 from torch import nn
-
-import ast
-import mlflow
 
 import hashlib
 
@@ -52,19 +46,18 @@ class UnetNoise2NoisePETCommons:
         else:
             return None
 
-    def reconstruction(self, *x, scale=None, corr=None, **kwargs):
+    def reconstruction(self, *y, scale=None, corr=None, filter='ramp', **kwargs):
+
+        pet_forward_operator = self.get_pet_forward_operator()
         #
         if corr is not None:
-            x = [ xx - corr for xx in x ]  # list of (B, C, H, W)
+            y = [ torch.clamp(yy - corr, min=0) for yy in y ]  # list of (B, C, H, W)
         #
-        if scale is not None:
-            x = [ xx / scale[i] for i, xx in enumerate(x) ]  # list of (B, C, H, W)
-
-        x = torch.stack(x, dim=0) # (n_sinos, B, C, H, W)
+        y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
         #
-        theta = torch.linspace(0, torch.pi, self.n_angles, device=x.device)
-        x_recon = iradon(x, theta=theta, output_size=self.image_size[-1], filter='ramp', circle=False)  # (n_sinos*B, C, H, W)
+        x_recon = pet_forward_operator.radon_backward(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), filter_name=filter, scale=scale, output_size=self.image_size[-1]) # (n_sinos*B, C, H, W)
         #
+        x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
         x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         return x_recon
 
@@ -232,21 +225,7 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
     def adjoint(self, y, image_size=None, voxel_size_mm=None, attenuation_map=None, scale=None):
         #
         if self.physics == 'backward_pet_radon':
-            if voxel_size_mm is None:
-                voxel_size_mm = self.voxel_size_mm
-            # Select appropriate operator as image size and voxel_size may vary and the number of angular bins may be subsampled.
-            pet_forward_operator = self.get_pet_forward_operator(
-                n_angles=y.shape[-1],
-                voxel_size_mm=voxel_size_mm
-            )
-            At_y = backward_pet_radon(
-                y,
-                attenuation_map=attenuation_map,
-                scale=scale,
-                image_size=image_size if image_size is not None else self.image_size,
-                voxel_size_mm=voxel_size_mm if voxel_size_mm is not None else self.voxel_size_mm,
-                forward_pet_radon_operator=pet_forward_operator,
-            )
+            At_y = self.reconstruction(y, scale=scale, corr=corr, filter='ramp')
         else:
             raise ValueError(f"Physics model '{self.physics}' not recognized for UNetNoise2NoisePET.")
         #
