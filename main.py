@@ -7,38 +7,39 @@ import torch
 
 if __name__ == "__main__":
 
-    unet_input_domain = 'image'
+    unet_input_domain = 'photon'
     unet_output_domain = 'image'
     supervised = False
 
     trainer = Noise2NoiseTrainer(
             dest_path=f"{os.getenv('WORKSPACE')}/data/noise2noise",
-            dataset_train_size=4096,
-            dataset_val_size=0,
+            dataset_train_size=2048,
+            dataset_val_size=2048,
             val_freq=1,
-            n_epochs=10,
+            n_epochs=15,
             batch_size=16,
             shuffle=True,
             simulator_config={
                 'image_size' : (160,160),
                 'voxel_size' : (2,2,2),
                 'n_angles' : 300,
-                'acquisition_time' : 207.85, # 207.85 is a pre-computed value to match 1e6 counts
+                'acquisition_time' : 207.85, #None, #207.85, # 207.85 is a pre-computed value to match 1e6 counts
                 'scanner_radius' : 300,
                 'nb_counts' : 1e6,
-                'scatter_component' : 0.36,
-                'random_component' : 0.50
+                'scatter_component' :  0.36,
+                'random_component' : 0.50,
+                'scatter_sigma': 4.0,
             },
             optimizer_config={
-                'lr': 5e-5
+                'lr': 5e-4,
             },
             unet_config = {
                 'conv_layer_type': 'Conv2d',
                 'n_levels': 4,
                 'global_conv': 32,
-                'residual_conv': False,
+                'residual_conv': True,
                 'physics_mode': 'pre_inverse',
-                'residual': True,
+                'residual': False,
                 'out_act': 'softplus',
                 'init': 'none'
             },
@@ -49,13 +50,10 @@ if __name__ == "__main__":
             reconstruction_config={},
             physics="backward_pet_radon",
             n_splits=2,
-            num_workers=1,
+            num_workers=10,
             objective_type='mse',
-            consensus_loss=True,
-            image_consistency=0.0, #5e-1
+            consensus_loss=False,
             prompt_consistency=0.0,
-            prior='tv',
-            prior_weight=0.0,
             seed=42
     )
 
@@ -63,7 +61,7 @@ if __name__ == "__main__":
     mlflow.set_tracking_uri("http://mlflow:5000")
     #
     # create experiment if not exists
-    experiment_name = f"Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}"
+    experiment_name = f"Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}_v2"
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
         mlflow.create_experiment(experiment_name)
