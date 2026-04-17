@@ -15,9 +15,23 @@ from pytorcher.utils import normalize_batch, PetForwardRadon
 from pytorcher.utils.prior import *
 
 from tools.image.metrics import PSNR, SSIM
-from tools.image.processing import reverse_grayscale
+from tools.image.processing import normalize
 
 import matplotlib.pyplot as plt
+import cv2
+
+def get_white_matter_mask(brain):
+    white_matter_mask = (brain == 36.0)
+
+    # erosion
+    kernel = np.ones((2,2), np.uint8)
+    white_matter_mask = cv2.erode(white_matter_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+    num_labels, labels_im = cv2.connectedComponents(white_matter_mask.astype(np.uint8))
+    sizes = np.bincount(labels_im.ravel())
+    largest_label = np.argmax(sizes[1:]) + 1  # Exclude background (label 0)
+    white_matter_mask = (labels_im == largest_label)
+    return white_matter_mask
 
 def anscombe(x):
     return 2 * torch.sqrt( x + (3/8) )
@@ -88,10 +102,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         if unet_input_domain == 'image':
             assert reconstruction_type is not None and reconstruction_type in ['fbp'], "Currently only 'fbp' reconstruction is supported."
         assert n_splits > 1, "n_splits must be greater than 1 for noise2noise training."
-        if unet_input_domain == 'photon' and unet_output_domain == 'image':
-            self.physics = physics
-        else:
-            self.physics = None # physics-informed training is only relevant for photon to image domain conversion task
+        self.physics = physics
         self.unet_config = unet_config
         self.unet_input_domain = unet_input_domain
         self.unet_output_domain = unet_output_domain
@@ -382,17 +393,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         else:
             raise NotImplementedError("Currently only 'radon' forward operator is supported for photon to image domain conversion.")
         return sinogram
-
-    def computes_masked_loss(self, loss, mask=None):
-        if mask is not None:
-            loss = loss * mask
-            loss = torch.sum(loss, dim=(1, 2, 3)) / torch.sum(mask, dim=(1, 2, 3)) # average loss per pixel
-            loss = torch.mean(loss) # average over batch
-        else:
-            loss = torch.mean(loss)
-        return loss
     
-    def compute_count_loss(self, output, target, mask=None):
+    def compute_count_loss(self, output, target):
         """
         Compute count loss for photon domain.
         Photon domain loss can be either Poisson NLL or heteroscedastic MSE or MSE in Anscombe domain.
@@ -409,11 +411,20 @@ class Noise2NoiseTrainer(PytorchTrainer):
             loss = self.objective(output, target)
         else:
             raise ValueError("Invalid objective type for photon domain. Supported types are 'poisson', 'mse' and 'mse_anscombe'.")
-        if mask is not None:
-            loss = self.computes_masked_loss(loss, mask)
         return loss
     
-    def compute_loss(self, output, target, attenuation_map=None, scale=None):
+    def compute_loss(self, output, target, attenuation_map=None, scale=None, corr=None, mask_im=None, mask_sino=None):
+
+        if mask_im is not None:
+            if self.unet_output_domain == 'image':
+                output = output * mask_im
+            else:
+                output = output * mask_sino
+        if mask_sino is not None:
+            if self.unet_input_domain == 'image':
+                target = target * mask_im
+            else:
+                target = target * mask_sino
 
         if self.unet_input_domain == self.unet_output_domain == 'photon':
             loss = self.compute_count_loss(output, target)
@@ -430,15 +441,23 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     attenuation_map=attenuation_map,
                     scale=scale,
                     forward_operator_type=self.forward_operator_type
-                ) * (1 / self.n_splits) # we divide by n_splits to match the scale of the target prompt.
+                )
                 #
-                loss = self.compute_count_loss(projected_output, target)
+                loss = self.compute_count_loss(projected_output, torch.clamp(target - corr, min=0))
             else:
                 loss = self.objective(output, target)
         #
         return loss
     
-    def compute_loss_addons(self, outputs, prompt, attenuation_map=None, scale=None, corr=None):
+    def compute_loss_addons(self, outputs, prompt, attenuation_map=None, scale=None, corr=None, mask_im=None, mask_sino=None):
+        if mask_im is not None:
+            if self.unet_output_domain == 'image':
+                outputs = [output * mask_im for output in outputs]
+            else:
+                outputs = [output * mask_sino for output in outputs]
+        if mask_sino is not None:
+            prompt = prompt * mask_sino
+        #
         loss_addons = {}
         #
         # remove consistency term from loss if consensus_loss is True
@@ -448,44 +467,48 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 output_i = outputs[i]
                 output_j = outputs[j]
                 #
-                
-                if self.unet_output_domain == 'photon':
-                    consensus_loss_ij = (1 / self.n_splits **2) * self.compute_count_loss(output_i, output_j)
+                if self.unet_output_domain == self.unet_input_domain:
+                    consensus_loss_ij = (1 / self.n_splits**2) * self.compute_loss(output_i, output_j)
                 else:
-                    consensus_loss_ij = (1 / self.n_splits **2) * self.objective(output_i, output_j)
+                    projected_i = self.pet_forward_operator(
+                        output_i,
+                        attenuation_map=attenuation_map,
+                        scale=scale,
+                        forward_operator_type=self.forward_operator_type
+                    )
+                    projected_j = self.pet_forward_operator(
+                        output_j,
+                        attenuation_map=attenuation_map,
+                        scale=scale,
+                        forward_operator_type=self.forward_operator_type
+                    )
+                    consensus_loss_ij = (1 / self.n_splits**2) * self.objective(projected_i, projected_j)
                 #
                 loss_addons[f'consensus_loss'] -= consensus_loss_ij
         #
-        if self.prompt_consistency > 0 or self.image_consistency > 0 or (self.prior is not None and self.prior_weight > 0):
+        if self.prompt_consistency > 0:
             z = torch.stack(outputs, dim=0) # (n_splits, B, C, H, W)
             z = torch.mean(z, dim=0) # (B, C, H, W)
-        # add image consistency
-        if self.image_consistency > 0:
-            # unet output domain has to be image
-            loss_image_consistency = self.image_consistency * self.objective(z, self.model.reconstruction(prompt, scale=scale))
-            #
-            loss_addons[f'image_consistency_loss'] = loss_image_consistency
-        #
-        # add prompt consistency
-        if self.prompt_consistency > 0:
-            if self.unet_output_domain == 'image':
-                z = self.pet_forward_operator(
-                    z,
-                    attenuation_map=attenuation_map,
-                    scale=scale,
-                    forward_operator_type=self.forward_operator_type
-                )
-            #
-            loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z, prompt)
-            #
-            loss_addons[f'prompt_consistency_loss'] = loss_prompt_consistency
 
-        if self.prior is not None and self.prior_weight > 0:
-            if self.prior == 'tv':
-                prior_loss = self.prior_weight * total_variation(z)
-            elif self.prior == 'gibbs':
-                prior_loss = self.prior_weight * gibbs(z)
-            loss_addons[f'{self.prior}_prior_loss'] = prior_loss
+            # add prompt consistency
+            if self.prompt_consistency > 0:
+                if self.unet_output_domain == 'image':
+                    z_projected = self.pet_forward_operator(
+                        z,
+                        attenuation_map=attenuation_map,
+                        scale=scale,
+                        forward_operator_type=self.forward_operator_type
+                    )
+                else:
+                    z_projected = z - corr
+                #
+                if mask_sino is not None:
+                    z_projected = z_projected * mask_sino
+                    corr = corr * mask_sino
+                #
+                loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z_projected, torch.clamp(prompt - corr, min=0))
+                #
+                loss_addons[f'prompt_consistency_loss'] = loss_prompt_consistency
 
         return loss_addons
         
@@ -544,10 +567,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     target = target
 
                 # Get mask for loss computation
-                if self.unet_input_domain == 'image':
-                    mask = (target > 0).float() # we compute loss only on foreground pixels to avoid background dominating the loss and metrics, as is common in PET imaging where background can be very large compared to foreground.
+                mask_im = (target > 0).float()
+                mask_sino = (att_sino > 1.02).float()
+                if self.unet_output_domain == 'image':
+                    mask = mask_im
                 else:
-                    mask = (att_sino > 1.02).float() # in photon domain, we compute loss only on pixels with non-zero attenuation, as these are the pixels that contribute to the sinogram and can be learned from.
+                    mask = mask_sino
 
                 # Denoise and compute loss on all pairs
                 for (i, j) in pairwise_permutations:
@@ -558,14 +583,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         x_i,
                         attenuation_map=att,
                         scale=scale,
-                        mask=mask
+                        mask=mask,
+                        corr=corr
                     )
                     if self.supervised:
                         loss_target = target
                     else:
                         loss_target = x_j
                     #
-                    loss_ij = self.compute_loss(output=output_i, target=loss_target, attenuation_map=att, scale=scale)
+                    loss_ij = self.compute_loss(output=output_i, target=loss_target, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
                     # We only update n2n_ metrics and loss here
                     metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
                     self.update_metrics(normalize_batch(target), normalize_batch(output_i), metric_names=metrics_to_update)
@@ -576,15 +602,18 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 loss = sum(split_losses) / len(split_losses)  # average over all pairs
                 #
                 # compute loss addons
-                loss_addons = self.compute_loss_addons(
-                    outputs=split_outputs,
-                    prompt=prompt,
-                    attenuation_map=att,
-                    scale=scale * self.n_splits,
-                    corr=corr * self.n_splits
-                )
+                if not self.supervised:
+                    loss_addons = self.compute_loss_addons(
+                        outputs=split_outputs,
+                        prompt=prompt,
+                        attenuation_map=att,
+                        scale=scale * self.n_splits,
+                        corr=corr * self.n_splits,
+                        mask_im=mask_im,
+                        mask_sino=mask_sino
+                    )
+                    loss = loss + sum(loss_addons.values())
                 # 
-                loss = loss + sum(loss_addons.values())
                 # Update loss
                 self.update_loss(loss)
                 # Backpropagation
@@ -640,10 +669,12 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             x = [self.model.reconstruction(s, scale=scale, corr=corr) for s in x]
 
                         # Create mask
-                        if self.unet_input_domain == 'image':
-                            mask = (gth > 0).float()
+                        mask_im = (target > 0).float()
+                        mask_sino = (att_sino > 1.02).float()
+                        if self.unet_output_domain == 'image':
+                            mask = mask_im
                         else:
-                            mask = (att_sino > 0).float()
+                            mask = mask_sino
 
                         # Denoise
                         if self.supervised:
@@ -677,9 +708,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             out_i = splits_infered[i]
                             # Loss computation for pair (i, j)
                             if not self.supervised:
-                                val_loss = self.compute_loss(output=out_i, target=x_j, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(output=out_i, target=x_j, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
                             else:
-                                val_loss = self.compute_loss(output=out_i, target=target, attenuation_map=att, scale=scale)
+                                val_loss = self.compute_loss(output=out_i, target=target, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
                             val_split_losses.append(val_loss)
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]
@@ -691,14 +722,16 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             prompt=prompt,
                             attenuation_map=att,
                             scale=scale * self.n_splits,
-                            corr=corr * self.n_splits
+                            corr=corr * self.n_splits,
+                            mask_im=mask_im,
+                            mask_sino=mask_sino
                         )
                         val_loss = val_loss + sum(val_loss_addons.values())
                         #
                         self.update_loss(val_loss)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
-                            output = self.model.reconstruction(*splits_infered, scale=scale, corr=corr) # (B, C, H, W)
+                            output = self.model.reconstruction(*splits_infered, scale=scale.repeat(self.n_splits), corr=corr) # (B, C, H, W)
                         else:
                             splits_infered = torch.stack(splits_infered, dim=0)  # (n_splits, B, C, H, W)
                             output = torch.mean(splits_infered, dim=0)  # (B, C, H, W)
@@ -718,9 +751,9 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 print(f'Inference on brain phantom for visual inspection of model performance evolution during training, batch {batch_idx+1}/{len(self.dataset_val_specific)} ...')
 
-                gth = gth.to('cpu').float().squeeze().detach().numpy().astype(np.float32)
 
                 # move data to device
+                gth = gth.to(self.device).float().unsqueeze(0) # add batch dimension
                 prompt = prompt.to(self.device).float().unsqueeze(0) # add batch dimension
                 nfpt = nfpt.to(self.device).float().unsqueeze(0) # add batch dimension
                 scale = torch.tensor(scale).to(self.device).float().unsqueeze(0) # add batch dimension
@@ -728,16 +761,25 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 corr = corr.to(self.device).float().unsqueeze(0) # add batch dimension
 
                 # Denoised reconstruction from prompt
-                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, monte_carlo_steps=1, split=True)
+                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, corr=corr, monte_carlo_steps=1, split=True)
+                # recon_noise2noise = torch.where(gth > 0, recon_noise2noise, torch.nan) # set background to zero for better visualization and metric computation
                 recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
 
                 # Compute metrics
+                gth = gth.to('cpu').float().squeeze().detach().numpy().astype(np.float32)
                 PSNR_denoised = PSNR(I=gth, K=recon_noise2noise, mask=gth>0)
                 SSIM_denoised = SSIM(img1=gth, img2=recon_noise2noise, mask=gth>0)
                 metrics = {
                     'psnr': PSNR_denoised.item(),
                     'ssim': SSIM_denoised.item()
                 }
+                # bias variance
+                white_matter_mask = get_white_matter_mask(gth)
+                bias_white_matter = (torch.abs(torch.mean(torch.tensor(recon_noise2noise)[white_matter_mask]) - torch.tensor(gth)[white_matter_mask][0]) / torch.tensor(gth)[white_matter_mask][0]).item()
+                expectation_squared_white_matter = torch.mean(torch.tensor(recon_noise2noise)[white_matter_mask] ** 2).item()
+                variance_white_matter = (torch.sqrt(expectation_squared_white_matter - (torch.mean(torch.tensor(recon_noise2noise)[white_matter_mask]) ** 2)) / torch.mean(torch.tensor(recon_noise2noise)[white_matter_mask])).item()
+                metrics['bias_white_matter'] = bias_white_matter
+                metrics['variance_white_matter'] = variance_white_matter
                 #
                 reconstructions = {
                     'denoised': recon_noise2noise
@@ -745,29 +787,30 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                 for input_type, input in zip(['nfpt', 'prompt'], [nfpt, prompt]):
                     recon_input = self.model.reconstruction(input, scale=scale, corr=corr).to('cpu').squeeze().detach().numpy().astype(np.float32)
+                    recon_input = recon_input
                     PSNR_input = PSNR(I=gth, K=recon_input, mask=gth>0)
                     SSIM_input = SSIM(img1=gth, img2=recon_input, mask=gth>0)
                     metrics[f'psnr_{input_type}'] = PSNR_input.item()
                     metrics[f'ssim_{input_type}'] = SSIM_input.item()
-                    reconstructions[f'{input_type}'] = recon_input
+                    reconstructions[f'{input_type}'] = recon_input              
 
                 with plt.style.context('ggplot'):
                     # create matplotlib figure
                     fig, ax = plt.subplots(1,3, figsize=(10,3))
                     # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
-                    ax[1].imshow(recon_noise2noise, cmap='gray_r')
+                    ax[1].imshow(recon_noise2noise, cmap='gray_r')#, vmin=0, vmax=230)
                     ax[1].set_title(f'Inference\nreconstruction')
                     ax[1].axis('off')
                     plt.colorbar(ax[1].images[0], ax=ax[1], fraction=0.046, pad=0.04)
                     ax[1].annotate(f'PSNR: {PSNR_denoised:.2f} dB,\n SSIM: {SSIM_denoised:.4f}', xy=(0.05,0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
-                    ax[2].imshow(reconstructions['nfpt'], cmap='gray_r')
+                    ax[2].imshow(reconstructions['nfpt'], cmap='gray_r', vmin=0, vmax=230)
                     ax[2].set_title(('Noise-free\nreconstruction'))
                     ax[2].axis('off')
                     plt.colorbar(ax[2].images[0], ax=ax[2], fraction=0.046, pad=0.04)
                     ax[2].annotate(f'PSNR: {metrics["psnr_nfpt"]:.2f} dB,\n SSIM: {metrics["ssim_nfpt"]:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
-                    ax[0].imshow(reconstructions['prompt'], cmap='gray_r')
+                    ax[0].imshow(reconstructions['prompt'], cmap='gray_r', vmin=0, vmax=230)
                     ax[0].set_title(f'Prompt\nreconstruction')
                     ax[0].axis('off')
                     plt.colorbar(ax[0].images[0], ax=ax[0], fraction=0.046, pad=0.04)
@@ -776,6 +819,27 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 #
                 mlflow.log_dict(metrics, f'brain_phantom/metrics_epoch_{epoch+1}.json')
                 mlflow.log_figure(fig, f'brain_phantom/reconstruction_epoch_{epoch+1}.png')
+
+                # plot paretto front evolution for bias and variance on brain phantom during training
+                white_matter_bias = []
+                white_matter_variance = []
+                for epoch_ in range(0, epoch+1):
+                    artifact_path = f'brain_phantom/metrics_epoch_{epoch_+1}.json'
+                    metrics = mlflow.artifacts.load_dict(f"{mlflow.active_run().info.artifact_uri}/{artifact_path}")
+                    white_matter_bias.append(metrics.get('bias_white_matter', None))
+                    white_matter_variance.append(metrics.get('variance_white_matter', None))
+
+                with plt.style.context('ggplot'):
+                    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+                    ax.plot(white_matter_variance, white_matter_bias, marker='o', color='gray')
+                    for epoch_, (bias, var) in enumerate(zip(white_matter_bias, white_matter_variance), start=1):
+                        ax.annotate(f'E{epoch_}', (var, bias), fontsize=8, ha='left')
+                    ax.set_ylabel('Bias in white matter')
+                    ax.set_xlabel('Variance in white matter')
+                    ax.set_title('Bias-Variance Evolution in White Matter during Training')
+                    plt.tight_layout()
+                    plt.close(fig)
+                    mlflow.log_figure(fig, 'brain_phantom/bias_variance_evolution.png')
 
             # # metric monitoring
             m_dict = {**m_dict_train, **m_dict_val}
@@ -797,6 +861,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             torch.cuda.empty_cache()
 
         # log final model
+        self.model.del_unpickable_attributes() # remove attributes that cannot be pickled for MLFlow model registering
         mlflow.pytorch.log_model(self.model, artifact_path="final_model", registered_model_name=self.model_name)
 
         # # log final best models

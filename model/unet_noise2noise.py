@@ -274,7 +274,7 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         else:
             return super().compute_skip_connection(x)
 
-    def forward(self, x, attenuation_map=None, scale=None, mask=None):
+    def forward(self, x, attenuation_map=None, scale=None, mask=None, corr=None):
         """
         :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
                   Even if input_domain is 'photon', one can provide a pre-computed adjoint image as input to save time during inference and training.
@@ -288,7 +288,7 @@ class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
         if self.input_domain == 'photon' and self.output_domain == 'image' and \
            self.physics is not None and isinstance(self.image_size, tuple) and \
            self.physics_mode == 'pre_inverse':
-            x = self.adjoint(x, image_size=self.image_size, attenuation_map=attenuation_map, scale=scale)
+            x = self.adjoint(x, image_size=self.image_size, attenuation_map=attenuation_map, scale=scale, corr=corr)
         #
         output = super().forward(x, attenuation_map=attenuation_map, scale=scale)
         # 
