@@ -122,7 +122,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         if (self.unet_output_domain == self.unet_input_domain == 'image') or (self.supervised and unet_output_domain == 'image'):
             assert objective_type.lower() in ['mse', 'l1', 'hubert'], "When both input and output domain is 'image', only 'MSE' is supported."
         else:
-            assert objective_type.lower() in ['poisson', 'mse', 'mse_anscombe'], "When output domain is 'photon', only 'Poisson' and 'MSE' are supported."
+            assert objective_type.lower() in ['poisson', 'mse', 'mse_anscombe', 'kl_divergence'], "When output domain is 'photon', only 'Poisson' and 'MSE' are supported."
         self.objective_type = objective_type
         self.consensus_loss = consensus_loss
         if self.consensus_loss:
@@ -315,6 +315,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
             objective = torch.nn.SmoothL1Loss(beta=1.0)
         elif type == 'poisson':
             objective = torch.nn.PoissonNLLLoss(log_input=False, full=False)
+        elif type == 'kl_divergence':
+            objective = torch.nn.KLDivLoss(log_target=True, reduction='batchmean')
         #
         self.model.loss_type = type # inform model about loss type for potential post-processing
         #
@@ -401,6 +403,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         """
         if self.objective_type.lower() == 'poisson':
             loss = self.objective(output, target)
+        elif self.objective_type.lower() == 'kl_divergence':
+            loss = self.objective(F.log_softmax(output + 1e-8, dim=-1), F.log_softmax(target + 1e-8, dim=-1))
         elif self.objective_type.lower() == 'mse':
             eps = 1.0 # to avoid division by zero, tuned according to Poisson range
             loss = self.objective(output / torch.sqrt(target + eps), target / torch.sqrt(target + eps)) # heteroscedastic MSE
@@ -482,7 +486,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         scale=scale,
                         forward_operator_type=self.forward_operator_type
                     )
-                    consensus_loss_ij = (1 / self.n_splits**2) * self.objective(projected_i, projected_j)
+                    consensus_loss_ij = (1 / self.n_splits**2) * self.compute_count_loss(projected_i, projected_j)
                 #
                 loss_addons[f'consensus_loss'] -= consensus_loss_ij
         #
@@ -798,7 +802,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     # create matplotlib figure
                     fig, ax = plt.subplots(1,3, figsize=(10,3))
                     # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
-                    ax[1].imshow(recon_noise2noise, cmap='gray_r')#, vmin=0, vmax=230)
+                    ax[1].imshow(recon_noise2noise, cmap='gray_r', vmin=0, vmax=230)
                     ax[1].set_title(f'Inference\nreconstruction')
                     ax[1].axis('off')
                     plt.colorbar(ax[1].images[0], ax=ax[1], fraction=0.046, pad=0.04)
