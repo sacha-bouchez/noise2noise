@@ -6,12 +6,14 @@ import torch
 import hashlib, json
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import multiprocessing
 
 from noise2noise.data.data_loader import SinogramGenerator, SinogramGeneratorSavedImages
 from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
 
 from pytorcher.trainer import PytorchTrainer
-from pytorcher.utils import normalize_batch, PetForwardRadon
+from pytorcher.utils import normalize_batch
+from pytorcher.pet_system import PetSystem
 from pytorcher.utils.prior import *
 
 from tools.image.metrics import PSNR, SSIM
@@ -146,6 +148,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.seed = seed
 
         self.num_workers = num_workers
+        if self.num_workers > 1:
+            multiprocessing.set_start_method('fork')
 
         #
         self_dict = self.__dict__.copy()
@@ -158,7 +162,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         if (self.unet_input_domain == 'photon' and self.unet_output_domain == 'image') or \
             (self.unet_input_domain == 'image' and self.image_consistency > 0) or \
             (self.prompt_consistency > 0):
-            self.get_pet_forward_operator() # initialize forward operator for potential use in photon to image domain conversion and measurement consistency loss
+            self.get_pet_system_operator() # initialize forward operator for potential use in photon to image domain conversion and measurement consistency loss
 
     def get_metrics(self, metrics=[]):
 
@@ -227,10 +231,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
             )
         
         # These parameters may be used for inference reconstruction or training backprojection later on, so we store them as trainer attributes so that they can be accessed from mlflow.
-        self.scanner_radius = self.dataset_train.sinogram_simulator.scanner_radius
+        self.scanner_radius = self.dataset_train.sinogram_simulator.scanner_radius_mm
         self.voxel_size_mm = self.dataset_train.sinogram_simulator.voxel_size_mm
         self.gaussian_PSF = self.dataset_train.sinogram_simulator.gaussian_PSF
-        self.n_angles = self.dataset_train.sinogram_simulator.n_angles
+        self.n_angles = self.dataset_train.sinogram_simulator.num_angles
         #
         self.sinogram_size = tuple(self.dataset_train[0][1].shape[-2:]) # (H, W) of the sinogram, needed for UNet input size
         self.dataset_val_seed = int(1e5) # Seed is fixed to have consistent validation sets. Changing image size or voxel size will give different results.
@@ -262,12 +266,17 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
         return loader_train, loader_val
     
-    def get_pet_forward_operator(self):
-        self.pet_forward = PetForwardRadon(
-            n_angles=self.n_angles,
-            scanner_radius_mm=self.scanner_radius,
-            gaussian_PSF_fwhm_mm=self.gaussian_PSF,
-            voxel_size_mm=self.voxel_size_mm
+    def get_pet_system_operator(self):
+        self.pet_system = PetSystem(
+            projector_type='parallelproj_parallel',
+            projector_config={
+                'num_angles': self.n_angles,
+                'scanner_radius_mm': self.scanner_radius,
+                'img_shape': self.image_size,
+                'voxel_size_mm': self.voxel_size_mm
+            },
+            gaussian_PSF=self.gaussian_PSF,
+            device=self.device
         )
 
     def get_optimizer(self, learning_rate=1e-3):
@@ -373,7 +382,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         mlflow.log_metric(metric.name, metric.result())
                         metric.reset_states()
 
-    def pet_forward_operator(self, image, attenuation_map=None, scale=None, forward_operator_type='radon'):
+    def pet_system_operator(self, image, attenuation_map=None, scale=None, forward_operator_type='radon'):
         """
         Apply the PET forward operator for self-supervised reconstruction.
         This will be used only if input domain is 'photon' and output domain is 'image',
@@ -387,7 +396,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
         #
         assert forward_operator_type.lower() in ['radon'], "Currently only 'radon' forward operator is supported for photon to image domain conversion."
         if forward_operator_type.lower() == 'radon':
-            sinogram = self.pet_forward.forward(
+            sinogram = self.pet_system.forward(
                 image=image,
                 attenuation_map=attenuation_map,
                 scale=scale
@@ -440,7 +449,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
             if not self.supervised:
                 #
-                projected_output = self.pet_forward_operator(
+                projected_output = self.pet_system_operator(
                     output,
                     attenuation_map=attenuation_map,
                     scale=scale,
@@ -474,13 +483,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 if self.unet_output_domain == self.unet_input_domain:
                     consensus_loss_ij = (1 / self.n_splits**2) * self.compute_loss(output_i, output_j)
                 else:
-                    projected_i = self.pet_forward_operator(
+                    projected_i = self.pet_system_operator(
                         output_i,
                         attenuation_map=attenuation_map,
                         scale=scale,
                         forward_operator_type=self.forward_operator_type
                     )
-                    projected_j = self.pet_forward_operator(
+                    projected_j = self.pet_system_operator(
                         output_j,
                         attenuation_map=attenuation_map,
                         scale=scale,
@@ -497,7 +506,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             # add prompt consistency
             if self.prompt_consistency > 0:
                 if self.unet_output_domain == 'image':
-                    z_projected = self.pet_forward_operator(
+                    z_projected = self.pet_system_operator(
                         z,
                         attenuation_map=attenuation_map,
                         scale=scale,
@@ -585,7 +594,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     # Inference and loss computation for pair (i, j)
                     output_i = self.model(
                         x_i,
-                        attenuation_map=att,
                         scale=scale,
                         mask=mask,
                         corr=corr
@@ -684,7 +692,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         if self.supervised:
                             splits_infered = self.model(
                                 torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
-                                attenuation_map=att,
                                 scale=scale,
                                 mask=mask
                             )
@@ -692,7 +699,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         else:
                             splits_infered = self.model(
                                 torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
-                                attenuation_map=torch.cat(self.n_splits * [att, ], dim=0), # repeat attenuation map accordingly
                                 scale=torch.cat(self.n_splits * [scale, ], dim=0)
                             )
                             splits_infered = torch.chunk(splits_infered, self.n_splits, dim=0)  # list of (B, C, H, W)
@@ -765,7 +771,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 corr = corr.to(self.device).float().unsqueeze(0) # add batch dimension
 
                 # Denoised reconstruction from prompt
-                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, attenuation_map=att, corr=corr, monte_carlo_steps=1, split=True)
+                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, corr=corr, monte_carlo_steps=1, split=True)
                 # recon_noise2noise = torch.where(gth > 0, recon_noise2noise, torch.nan) # set background to zero for better visualization and metric computation
                 recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
 

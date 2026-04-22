@@ -1,6 +1,6 @@
 from pytorcher.models import UNet
 
-from pytorcher.utils import PetForwardRadon
+from pytorcher.pet_system import PetSystem
 
 import torch
 from torch import nn
@@ -10,59 +10,89 @@ import hashlib
 
 from pytorcher.utils import tensor_hash
 
-class UnetNoise2NoisePETCommons:
+
+class UNetNoise2NoisePET(UNet):
 
     """
-    Common methods for UNet Noise2Noise models.
+    U-Net model for Noise2Noise.
+    If outputs are in the photon/Poisson domain using 'mse_anscombe' loss, apply the rescale stage at inference time.
     """
 
-    def init_pet_forward_operator(self, n_angles=None, scanner_radius_mm=None, gaussian_PSF_fwhm_mm=None, voxel_size_mm=None):
-        if self.physics == 'backward_pet_radon':
-            self.forward_pet_radon_operator = {}
-            geometry = {
-                'n_angles':self.n_angles if n_angles is None else n_angles,
-                'scanner_radius_mm':self.scanner_radius if scanner_radius_mm is None else scanner_radius_mm,
-                'gaussian_PSF_fwhm_mm':self.gaussian_PSF if gaussian_PSF_fwhm_mm is None else gaussian_PSF_fwhm_mm,
-                'voxel_size_mm':self.voxel_size_mm if voxel_size_mm is None else voxel_size_mm
-            }
-            self.forward_pet_radon_operator[hashlib.md5(str(geometry).encode()).hexdigest()] = PetForwardRadon(**geometry)
-        else:
-            self.forward_pet_radon_operator = None
+    def __init__(self, *args,
+                 input_domain='image', output_domain='image',
+                 physics='backward_pet_radon', 
+                 physics_mode='pre_inverse',
+                 sinogram_size=(300, 300),
+                 geometry={},
+                 reconstruction_type='fbp',
+                 reconstruction_config={},
+                 image_size=(160,160),
+                 n_splits=2,
+                 **kwargs):
+        #
+        self.input_domain = input_domain
+        self.output_domain = output_domain
+        #
+        self.n_angles = geometry.get('n_angles', 300)
+        self.scanner_radius = geometry.get('scanner_radius_mm', 300)
+        self.gaussian_PSF = geometry.get('gaussian_PSF_fwhm_mm', 4.0)
+        self.voxel_size_mm = geometry.get('voxel_size_mm', 2.0)
+        #
+        #
+        self.image_size = image_size
+        self.sinogram_size = sinogram_size
+        self.n_splits = n_splits
+        self.reconstruction_type = reconstruction_type
+        self.reconstruction_config = reconstruction_config
+        assert self.reconstruction_type.lower() in ['fbp'], "Currently only FBP is supported."
+        #
+        # must call nn.Module init before assigning any nn.Module attributes such as done in init_pet_system_operator and get_reconstruction_operator
+        super(UNetNoise2NoisePET, self).__init__(*args, **kwargs)
         
-    def get_pet_forward_operator(self, n_angles=None, scanner_radius_mm=None, gaussian_PSF_fwhm_mm=None, voxel_size_mm=None):
-        if self.physics == 'backward_pet_radon':
-            if not hasattr(self, 'forward_pet_radon_operator'):
-                self.init_pet_forward_operator()
+    def get_pet_system_operator(self):
+
+        if not hasattr(self, 'pet_system_operator'):
             geometry = {
-                'n_angles':self.n_angles if n_angles is None else n_angles,
-                'scanner_radius_mm':self.scanner_radius if scanner_radius_mm is None else scanner_radius_mm,
-                'gaussian_PSF_fwhm_mm':self.gaussian_PSF if gaussian_PSF_fwhm_mm is None else gaussian_PSF_fwhm_mm,
-                'voxel_size_mm':self.voxel_size_mm if voxel_size_mm is None else voxel_size_mm
+                'num_angles':self.n_angles,
+                'scanner_radius_mm':self.scanner_radius,
+                'voxel_size_mm':self.voxel_size_mm
             }
-            geometry_hash = hashlib.md5(str(geometry).encode()).hexdigest()
-            if geometry_hash not in self.forward_pet_radon_operator:
-                self.init_pet_forward_operator(n_angles=n_angles, scanner_radius_mm=scanner_radius_mm, gaussian_PSF_fwhm_mm=gaussian_PSF_fwhm_mm, voxel_size_mm=voxel_size_mm)
-            return self.forward_pet_radon_operator[geometry_hash]
+            self.pet_system_operator = PetSystem(
+                projector_type='parallelproj_parallel',
+                projector_config=geometry,
+                gaussian_PSF=self.gaussian_PSF,
+                device=next(self.parameters()).device
+            )
+
+        return self.pet_system_operator
+
+    def reconstruction(self, *y, scale=None, corr=None, mode='adjoint', **kwargs):
+
+        if mode == 'adjoint':
+            # We apply the adjoint operator to each sinogram and average the results
+            # Correction is removed before applying the adjoint.
+
+            pet_system_operator = self.get_pet_system_operator()
+
+            # update scale if corr is provided
+            if corr is not None and scale is not None:
+                count_ratio = [ torch.sum(corr, dim=[1,2,3]) / (torch.sum(yy, dim=[1,2,3])) for yy in y ]  # list of (B,)
+                count_ratio = torch.stack(count_ratio, dim=0)  # (n_sinos * B,)
+                scale = scale * count_ratio  # (n_sinos * B,)
+
+            if corr is not None:
+                y = [ torch.clamp(yy - corr, min=0) for yy in y ]  # list of (B, C, H, W)
+
+            #
+            y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
+            #
+            x_recon = pet_system_operator.adjoint(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), scale=scale, **kwargs) # (n_sinos*B, C, H, W)
+            #
+            x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
+            x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         else:
-            return None
-
-    def reconstruction(self, *y, scale=None, corr=None, filter='ramp', **kwargs):
-
-        pet_forward_operator = self.get_pet_forward_operator()
-        # update scale if corr is provided
-        if corr is not None and scale is not None:
-            count_ratio = [ torch.sum(corr, dim=[1,2,3]) / (torch.sum(yy, dim=[1,2,3])) for yy in y ]  # list of (B,)
-            count_ratio = torch.stack(count_ratio, dim=0)  # (n_sinos * B,)
-            scale = scale * count_ratio  # (n_sinos * B,)
-        if corr is not None:
-            y = [ torch.clamp(yy - corr, min=0) for yy in y ]  # list of (B, C, H, W)
-        #
-        y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
-        #
-        x_recon = pet_forward_operator.radon_backward(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), filter_name=filter, scale=scale, output_size=self.image_size[-1]) # (n_sinos*B, C, H, W)
-        #
-        x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
-        x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
+            raise ValueError(f"Unknown reconstruction mode: {mode}")
+        
         return x_recon
 
 
@@ -122,7 +152,7 @@ class UnetNoise2NoisePETCommons:
 
         return splits
     
-    def forward_inference(self, x, scale, attenuation_map=None, corr=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
+    def forward_inference(self, x, scale, corr=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
         """
         Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
         The splitting process has some randomness; set seed for reproducibility.
@@ -162,7 +192,7 @@ class UnetNoise2NoisePETCommons:
                 splits = self.reconstruction(splits, scale=scale, corr=corr)  # (B * n_splits, C, H, W)
 
             # Denoise
-            splits_denoised = self.forward(splits, attenuation_map=attenuation_map, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
+            splits_denoised = self.forward(splits, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
 
             # Expand splits to have (n_splits, B, C, H, W)
             splits_denoised = torch.chunk(splits_denoised, self.n_splits, dim=0)  # list of (B, C, H, W)
@@ -188,100 +218,18 @@ class UnetNoise2NoisePETCommons:
         if hasattr(self, 'forward_pet_radon_operator'):
             del self.forward_pet_radon_operator
 
-class UNetNoise2NoisePET(UNet, UnetNoise2NoisePETCommons):
-
-    """
-    U-Net model for Noise2Noise.
-    If outputs are in the photon/Poisson domain using 'mse_anscombe' loss, apply the rescale stage at inference time.
-    """
-
-    def __init__(self, *args,
-                 input_domain='image', output_domain='image',
-                 physics='backward_pet_radon', 
-                 physics_mode='pre_inverse',
-                 sinogram_size=(300, 300),
-                 geometry={},
-                 reconstruction_type='fbp',
-                 reconstruction_config={},
-                 image_size=(160,160),
-                 n_splits=2,
-                 **kwargs):
-        #
-        self.input_domain = input_domain
-        self.output_domain = output_domain
-        assert physics in [None, 'backward_pet_radon'], "Currently only 'backward_pet_radon' physics is supported for UNetNoise2NoisePET. Future versions may include more complex physics models such as the pseudo-inverse."
-        self.physics = physics
-        self.physics_mode = physics_mode
-        assert self.physics_mode in ['pre_inverse', 'skip_connection'], "Currently only 'pre_inverse' and 'skip_connection' physics modes are supported for UNetNoise2NoisePET."
-        #
-        self.n_angles = geometry.get('n_angles', 300)
-        self.scanner_radius = geometry.get('scanner_radius_mm', 300)
-        self.gaussian_PSF = geometry.get('gaussian_PSF_fwhm_mm', 4.0)
-        self.voxel_size_mm = geometry.get('voxel_size_mm', 2.0)
-        #
-        #
-        self.image_size = image_size
-        self.sinogram_size = sinogram_size
-        self.n_splits = n_splits
-        self.reconstruction_type = reconstruction_type
-        self.reconstruction_config = reconstruction_config
-        assert self.reconstruction_type.lower() in ['fbp'], "Currently only FBP is supported."
-        #
-        # must call nn.Module init before assigning any nn.Module attributes such as done in init_pet_forward_operator and get_reconstruction_operator
-        super(UNetNoise2NoisePET, self).__init__(*args, **kwargs)
-        #
-        if self.input_domain == 'photon' and self.output_domain == 'image' and not hasattr(self, 'forward_pet_radon_operator'):
-            self.init_pet_forward_operator()
-
-
-    def adjoint(self, y, image_size=None, voxel_size_mm=None, attenuation_map=None, scale=None):
-        #
-        if self.physics == 'backward_pet_radon':
-            At_y = self.reconstruction(y, scale=scale, corr=corr, filter='ramp')
-        else:
-            raise ValueError(f"Physics model '{self.physics}' not recognized for UNetNoise2NoisePET.")
-        #
-        return At_y
-
-    def compute_skip_connection(self, x, attenuation_map=None, scale=None):
-        if self.input_domain == 'photon' and self.output_domain == 'image' and self.physics_mode == 'skip_connection':
-            # We compute the adjoint in the skip connection
-            size_ratio = ( x.shape[-2] / self.sinogram_size[0], x.shape[-1] / self.sinogram_size[1] )
-            image_size = ( int(self.image_size[0] * size_ratio[0]), int(self.image_size[1] * size_ratio[1]) )
-            # Resize attenuation map if needed
-            if attenuation_map is not None and (attenuation_map.shape[-2], attenuation_map.shape[-1]) != image_size:
-                attenuation_map = torch.nn.functional.interpolate(attenuation_map, size=image_size, mode='bilinear', align_corners=False)
-            # Add channels to attenuation map if needed
-            n_channels_x = x.shape[1]
-            if attenuation_map is not None and attenuation_map.shape[1] != n_channels_x:
-                attenuation_map = attenuation_map.repeat(1, n_channels_x, 1, 1)
-            # Rescale voxel size if needed
-            if size_ratio != (1.0, 1.0):
-                voxel_size_mm = (self.voxel_size_mm / size_ratio[0], self.voxel_size_mm / size_ratio[1])
-            else:
-                voxel_size_mm = self.voxel_size_mm
-            x = self.adjoint(x, image_size=image_size, voxel_size_mm=voxel_size_mm, attenuation_map=attenuation_map, scale=scale)
-            return x
-        else:
-            return super().compute_skip_connection(x)
-
-    def forward(self, x, attenuation_map=None, scale=None, mask=None, corr=None):
+    def forward(self, x, scale=None, mask=None, corr=None):
         """
         :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
-                  Even if input_domain is 'photon', one can provide a pre-computed adjoint image as input to save time during inference and training.
-        :param x_domain: 'photon' or 'image', only needed if the domain of x is different from self.input_domain and we need to apply the adjoint operator. If None, it will be inferred from the shape of x and self.input_domain.
-        :param attenuation_map: (B, C, H, W) attenuation map to be used for the adjoint operator. If None, no attenuation will be applied.
+        :param x_domain: 'photon' or 'image', only needed if the domain of x is different from self.input_domain and we need to apply the reconstruction operator. If None, it will be inferred from the shape of x and self.input_domain.
+        :param attenuation_map: (B, C, H, W) attenuation map to be used for the reconstruction operator. If None, no attenuation will be applied.
         :param scale: (B,) scale factor to be applied to sinogram before reconstruction. This is typically acquisition_time * np.log(2) / half_life, but can be set to 1 if the input sinogram has already been scaled accordingly. If None, no scaling will be applied.
         """
-        # x may be stacked splits, attenuation_map may need to be repeated
-        if attenuation_map is not None and attenuation_map.shape[0] != x.shape[0]:
-            attenuation_map = torch.repeat_interleave(attenuation_map, repeats=self.n_splits, dim=0)
-        if self.input_domain == 'photon' and self.output_domain == 'image' and \
-           self.physics is not None and isinstance(self.image_size, tuple) and \
-           self.physics_mode == 'pre_inverse':
-            x = self.adjoint(x, image_size=self.image_size, attenuation_map=attenuation_map, scale=scale, corr=corr)
+
+        if self.input_domain == 'photon' and self.output_domain == 'image':
+            x = self.reconstruction(x, scale=scale, corr=corr, mode='adjoint')  # (B, C, H, W)
         #
-        output = super().forward(x, attenuation_map=attenuation_map, scale=scale)
+        output = super().forward(x)
         # 
         # Anscombe inverse transform to convert back to original Poisson scale
         if hasattr(self, 'loss_type') and self.loss_type == 'mse_anscombe' and not self.training:

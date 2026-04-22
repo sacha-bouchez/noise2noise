@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from pet_simulator import SinogramSimulator
+from pet_simulator import PetSystem
 from phantom_simulation import Phantom2DPetGenerator
 
 from tools.image.castor import read_castor_binary_file
@@ -17,12 +17,12 @@ class SinogramGenerator(Dataset):
             self,
             dest_path='./',
             length=10,
-            image_size=(256,256),
+            image_size=(160,160),
             voxel_size=(2,2,2),
             n_angles=300,
             scanner_radius=300,
             volume_activity=1e3,  # in kBq/ml this is a reasonable pre-computed value for toy simulator
-            nb_counts=3e6,
+            nb_counts=1e6,
             half_life=109.8*60,
             acquisition_time=None,
             scatter_component=0.36,
@@ -52,14 +52,18 @@ class SinogramGenerator(Dataset):
         #
         self.phantom_generator = Phantom2DPetGenerator(shape=image_size, voxel_size=voxel_size, volume_activity=volume_activity)
         #
-        self.sinogram_simulator = SinogramSimulator(
-            n_angles=n_angles,
-            scanner_radius=scanner_radius,
-            voxel_size_mm=voxel_size[:2],
+        self.sinogram_simulator = PetSystem(
+            projector_type='parallelproj_parallel',
+            projector_config={
+                'scanner_radius_mm': scanner_radius,
+                'num_angles': n_angles,
+                'img_shape': image_size,
+                'voxel_size_mm': voxel_size[:2],
+            },
             scatter_component=scatter_component,
+            scatter_sigma=scatter_sigma,
             random_component=random_component,
             gaussian_PSF=gaussian_PSF,
-            scatter_sigma=scatter_sigma,
             half_life=half_life,
             seed=seed
         )
@@ -288,17 +292,17 @@ if __name__ == '__main__':
 
 
     dest_path = os.path.join(os.getenv("WORKSPACE"), "data", "test")
-    dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42, scanner_radius=400)
+    dataset = SinogramGenerator(dest_path=dest_path, length=2, seed=42, scanner_radius=300)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    for i, (dest_path, prompt, nfpt, gth, att, scale) in enumerate(loader):
+    for i, (dest_path, prompt, nfpt, gth, att, att_sino, corr, scale) in enumerate(loader):
         pass
 
     fig, ax = plt.subplots(1,3, figsize=(12,4))
-    ax[0].imshow(prompt[0], cmap='gray')
+    ax[0].imshow(prompt.squeeze(), cmap='gray')
     ax[0].set_title('Prompt')
-    ax[1].imshow(nfpt[0], cmap='gray')
+    ax[1].imshow(nfpt.squeeze(), cmap='gray')
     ax[1].set_title('Noisy 2')
-    ax[2].imshow(gth[0], cmap='gray')
+    ax[2].imshow(gth.squeeze(), cmap='gray')
     ax[2].set_title('Clean')
     plt.show()
