@@ -49,7 +49,11 @@ class UnetNoise2NoisePETCommons:
     def reconstruction(self, *y, scale=None, corr=None, filter='ramp', **kwargs):
 
         pet_forward_operator = self.get_pet_forward_operator()
-        #
+        # update scale if corr is provided
+        if corr is not None and scale is not None:
+            count_ratio = [ torch.sum(corr, dim=[1,2,3]) / (torch.sum(yy, dim=[1,2,3])) for yy in y ]  # list of (B,)
+            count_ratio = torch.stack(count_ratio, dim=0)  # (n_sinos * B,)
+            scale = scale * count_ratio  # (n_sinos * B,)
         if corr is not None:
             y = [ torch.clamp(yy - corr, min=0) for yy in y ]  # list of (B, C, H, W)
         #
@@ -137,6 +141,9 @@ class UnetNoise2NoisePETCommons:
         # Stack scale accordingly
         if split:
             scale = (scale / self.n_splits).repeat(self.n_splits) # Dividing the number of counts by n_splits is equivalent to dividing scale factor by n_splits
+
+        if corr is not None:
+            corr = corr / self.n_splits
 
         outputs = torch.zeros((x.shape[0], x.shape[1], self.image_size[0], self.image_size[1]), device=x.device) # (B, C, H, W)
         for i in range(monte_carlo_steps):
