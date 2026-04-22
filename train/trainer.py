@@ -364,13 +364,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     corr = corr.to(self.device).float()
 
                     # reconstruction from noise-free sinogram
-                    recon_nfpt = self.model.reconstruction(nfpt, scale=scale, corr=corr)
+                    recon_nfpt = self.model.reconstruction(nfpt, scale=scale, corr=corr, attenuation_map=att)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'nfpt' in m.name ]
                     self.update_metrics(normalize_batch(gth), normalize_batch(recon_nfpt), metric_names=metrics_to_update)
 
                     # reconstruction from prompt sinogram
-                    recon_prompt = self.model.reconstruction(prompt, scale=scale, corr=corr)
+                    recon_prompt = self.model.reconstruction(prompt, scale=scale, corr=corr, attenuation_map=att)
                     # update im_ metrics for reference
                     metrics_to_update = [ m.name for m in self.metrics if 'prompt' in m.name ]
                     self.update_metrics(normalize_batch(gth), normalize_batch(recon_prompt), metric_names=metrics_to_update)
@@ -570,7 +570,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 #
                 # Apply reconstruction if needed
                 if self.unet_input_domain == 'image':
-                    x = [self.model.reconstruction(s, scale=scale, corr=corr) for s in splitted_prompts]
+                    x = [self.model.reconstruction(s, scale=scale, corr=corr, attenuation_map=att) for s in splitted_prompts]
                 else:
                     x = splitted_prompts
 
@@ -678,7 +678,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
 
                         # Apply reconstruction if needed
                         if self.unet_input_domain == 'image':
-                            x = [self.model.reconstruction(s, scale=scale, corr=corr) for s in x]
+                            x = [self.model.reconstruction(s, scale=scale, corr=corr, attenuation_map=att) for s in x]
 
                         # Create mask
                         mask_im = (target > 0).float()
@@ -741,7 +741,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         self.update_loss(val_loss)
                         # Apply reconstruction if needed and average outputs
                         if self.unet_output_domain == 'photon':
-                            output = self.model.reconstruction(*splits_infered, scale=scale.repeat(self.n_splits), corr=corr) # (B, C, H, W)
+                            output = self.model.reconstruction(*splits_infered, scale=scale.repeat(self.n_splits), corr=corr, attenuation_map=att) # (B, C, H, W)
                         else:
                             splits_infered = torch.stack(splits_infered, dim=0)  # (n_splits, B, C, H, W)
                             output = torch.mean(splits_infered, dim=0)  # (B, C, H, W)
@@ -796,7 +796,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 }
 
                 for input_type, input in zip(['nfpt', 'prompt'], [nfpt, prompt]):
-                    recon_input = self.model.reconstruction(input, scale=scale, corr=corr).to('cpu').squeeze().detach().numpy().astype(np.float32)
+                    recon_input = self.model.reconstruction(input, scale=scale, corr=corr, attenuation_map=att).to('cpu').squeeze().detach().numpy().astype(np.float32)
                     recon_input = recon_input
                     PSNR_input = PSNR(I=gth, K=recon_input, mask=gth>0)
                     SSIM_input = SSIM(img1=gth, img2=recon_input, mask=gth>0)

@@ -8,7 +8,7 @@ from torch import nn
 import hashlib
 
 
-from pytorcher.utils import tensor_hash
+from pytorcher.utils import tensor_hash, iradon
 
 
 class UNetNoise2NoisePET(UNet):
@@ -66,9 +66,9 @@ class UNetNoise2NoisePET(UNet):
 
         return self.pet_system_operator
 
-    def reconstruction(self, *y, scale=None, corr=None, mode='adjoint', **kwargs):
+    def reconstruction(self, *y, scale=None, attenuation_map=None, corr=None, mode='fbp', **kwargs):
 
-        if mode == 'adjoint':
+        if mode == 'adjoint' or mode == 'fbp':
             # We apply the adjoint operator to each sinogram and average the results
             # Correction is removed before applying the adjoint.
 
@@ -86,7 +86,11 @@ class UNetNoise2NoisePET(UNet):
             #
             y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
             #
-            x_recon = pet_system_operator.adjoint(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), scale=scale, **kwargs) # (n_sinos*B, C, H, W)
+            if mode == 'fbp':
+                x_recon = pet_system_operator.fbp(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), attenuation_map=attenuation_map, scale=scale, **kwargs) # (n_sinos*B, C, H, W)
+            else:
+                raise ValueError(f"Unknown reconstruction mode: {mode}")
+
             #
             x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
             x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
@@ -152,7 +156,7 @@ class UNetNoise2NoisePET(UNet):
 
         return splits
     
-    def forward_inference(self, x, scale, corr=None, seed=None, mask=None, monte_carlo_steps=1, split=True):
+    def forward_inference(self, x, scale, corr=None, seed=None, attenuation_map=None, mask=None, monte_carlo_steps=1, split=True):
         """
         Forward pass through the Noise2Noise U-Net model with input splitting and output aggregation.
         The splitting process has some randomness; set seed for reproducibility.
@@ -161,6 +165,7 @@ class UNetNoise2NoisePET(UNet):
         :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
         :param scale: (B,) scale factor to be applied to sinogram before reconstruction.
         :param seed: random seed for splitting
+        :param attenuation_map: (B, 1, H, W) attenuation map tensor, used for adjoint computation.
         :param mask: (B, 1, H, W) mask tensor to apply to the output
         :param monte_carlo_steps: number of stochastic passes to average
         :return: (B, C, H, W) output image tensor
@@ -189,7 +194,7 @@ class UNetNoise2NoisePET(UNet):
 
             # Apply reconstruction if needed
             if self.unet_input_domain == 'image':
-                splits = self.reconstruction(splits, scale=scale, corr=corr)  # (B * n_splits, C, H, W)
+                splits = self.reconstruction(splits, scale=scale, corr=corr, attenuation_map=attenuation_map)  # (B * n_splits, C, H, W)
 
             # Denoise
             splits_denoised = self.forward(splits, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
@@ -199,7 +204,7 @@ class UNetNoise2NoisePET(UNet):
 
             # Apply reconstruction if needed and average outputs
             if self.unet_output_domain == 'photon':
-                output = self.reconstruction(*splits_denoised, scale=scale, corr=corr) # (B, C, H, W)
+                output = self.reconstruction(*splits_denoised, scale=scale, corr=corr, attenuation_map=attenuation_map) # (B, C, H, W)
             else:
                 splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
                 output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)
@@ -218,7 +223,7 @@ class UNetNoise2NoisePET(UNet):
         if hasattr(self, 'forward_pet_radon_operator'):
             del self.forward_pet_radon_operator
 
-    def forward(self, x, scale=None, mask=None, corr=None):
+    def forward(self, x, scale=None, mask=None, corr=None, attenuation_map=None):
         """
         :param x: either a batch of sinograms (B, C, H, W) if input_domain is 'photon', or a batch of images if input_domain is 'image'.
         :param x_domain: 'photon' or 'image', only needed if the domain of x is different from self.input_domain and we need to apply the reconstruction operator. If None, it will be inferred from the shape of x and self.input_domain.
@@ -227,7 +232,7 @@ class UNetNoise2NoisePET(UNet):
         """
 
         if self.input_domain == 'photon' and self.output_domain == 'image':
-            x = self.reconstruction(x, scale=scale, corr=corr, mode='adjoint')  # (B, C, H, W)
+            x = self.reconstruction(x, scale=scale, corr=corr, attenuation_map=attenuation_map, mode='fbp')  # (B, C, H, W)
         #
         output = super().forward(x)
         # 
