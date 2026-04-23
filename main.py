@@ -58,7 +58,7 @@ if __name__ == "__main__":
     )
 
     # setup mlflow
-    mlflow.set_tracking_uri("http://mlflow:5000")
+    mlflow.set_tracking_uri(os.getenv('MLFLOW_TRACKING_URI'))
     #
     # create experiment if not exists
     experiment_name = f"Noise2Noise_2DPET_{unet_input_domain}_to_{unet_output_domain}_v2"
