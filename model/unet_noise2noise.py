@@ -68,12 +68,12 @@ class UNetNoise2NoisePET(UNet):
 
     def reconstruction(self, *y, scale=None, attenuation_map=None, corr=None, mode='fbp', **kwargs):
 
-        if mode == 'adjoint' or mode == 'fbp':
-            # We apply the adjoint operator to each sinogram and average the results
-            # Correction is removed before applying the adjoint.
+        # We apply the adjoint operator to each sinogram and average the results
+        # Correction is removed before applying the adjoint.
 
-            pet_system_operator = self.get_pet_system_operator()
+        pet_system_operator = self.get_pet_system_operator()
 
+        if mode == 'fbp':
             # update scale if corr is provided
             if corr is not None and scale is not None:
                 count_ratio = [ torch.sum(corr, dim=[1,2,3]) / (torch.sum(yy, dim=[1,2,3])) for yy in y ]  # list of (B,)
@@ -83,19 +83,20 @@ class UNetNoise2NoisePET(UNet):
             if corr is not None:
                 y = [ torch.clamp(yy - corr, min=0) for yy in y ]  # list of (B, C, H, W)
 
-            #
-            y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
-            #
-            if mode == 'fbp':
-                x_recon = pet_system_operator.fbp(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), attenuation_map=attenuation_map, scale=scale, **kwargs) # (n_sinos*B, C, H, W)
-            else:
-                raise ValueError(f"Unknown reconstruction mode: {mode}")
+        #
+        y = torch.stack(y, dim=0) # (n_sinos, B, C, H, W)
+        #
+        if mode == 'fbp':
+            x_recon = pet_system_operator.fbp(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), scale=scale, **kwargs) # (n_sinos*B, C, H, W)
 
-            #
-            x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
-            x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
+        elif mode == 'mlem':
+            x_recon = pet_system_operator.mlem(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), num_it=10, corr=corr, attenuation_map=attenuation_map, scale=scale, **kwargs) # (n_sinos*B, C, H, W)
         else:
             raise ValueError(f"Unknown reconstruction mode: {mode}")
+
+        #
+        x_recon = x_recon.view(y.shape[0], y.shape[1], x_recon.shape[1], x_recon.shape[2], x_recon.shape[3]) # (n_sinos, B, C, H, W)
+        x_recon = torch.mean(x_recon, dim=0)  # (B, C, H, W)
         
         return x_recon
 
