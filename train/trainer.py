@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import multiprocessing
 
-from noise2noise.data.data_loader import SinogramGenerator, SinogramGeneratorSavedImages
-from noise2noise.model.unet_noise2noise import UNetNoise2NoisePET as UNet
+from data.data_loader import SinogramGenerator, SinogramGeneratorSavedImages
+from model.unet_noise2noise import UNetNoise2NoisePET as UNet
 
 from pytorcher.trainer import PytorchTrainer
 from pytorcher.utils import normalize_batch
