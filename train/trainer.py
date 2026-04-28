@@ -434,6 +434,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             else:
                 output = output * mask_sino
         if mask_sino is not None:
+            corr = corr * mask_sino
             if self.unet_input_domain == 'image':
                 target = target * mask_im
             else:
@@ -456,7 +457,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     forward_operator_type=self.forward_operator_type
                 )
                 #
-                loss = self.compute_count_loss(projected_output, torch.clamp(target - corr, min=0))
+                loss = self.compute_count_loss(projected_output + corr, target)
             else:
                 loss = self.objective(output, target)
         #
@@ -495,6 +496,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         scale=scale,
                         forward_operator_type=self.forward_operator_type
                     )
+                    if mask_sino is not None:
+                        projected_i = projected_i * mask_sino
+                        projected_j = projected_j * mask_sino
+                    #
                     consensus_loss_ij = (1 / self.n_splits**2) * self.compute_count_loss(projected_i, projected_j)
                 #
                 loss_addons[f'consensus_loss'] -= consensus_loss_ij
@@ -513,13 +518,13 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         forward_operator_type=self.forward_operator_type
                     )
                 else:
-                    z_projected = z - corr
+                    z_projected = z
                 #
                 if mask_sino is not None:
                     z_projected = z_projected * mask_sino
                     corr = corr * mask_sino
                 #
-                loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z_projected, torch.clamp(prompt - corr, min=0))
+                loss_prompt_consistency = self.prompt_consistency * self.compute_count_loss(z_projected + corr, prompt)
                 #
                 loss_addons[f'prompt_consistency_loss'] = loss_prompt_consistency
 
