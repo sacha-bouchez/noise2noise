@@ -601,6 +601,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         x_i,
                         scale=scale,
                         mask=mask,
+                        attenuation_map=att,
                         corr=corr
                     )
                     if self.supervised:
@@ -698,13 +699,17 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             splits_infered = self.model(
                                 torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
                                 scale=scale,
+                                attenuation_map=att,
+                                corr=corr,
                                 mask=mask
                             )
                             splits_infered = splits_infered.chunk(1, dim=0) # dummy chunk to have same format as unsupervised case for easier code reuse
                         else:
                             splits_infered = self.model(
                                 torch.cat(x, dim=0), # concatenate splits along batch dimension for efficient inference
-                                scale=torch.cat(self.n_splits * [scale, ], dim=0)
+                                scale=torch.cat(self.n_splits * [scale, ], dim=0),
+                                attenuation_map=torch.cat(self.n_splits * [att, ], dim=0),
+                                corr=torch.cat(self.n_splits * [corr, ], dim=0)
                             )
                             splits_infered = torch.chunk(splits_infered, self.n_splits, dim=0)  # list of (B, C, H, W)
                         #
@@ -776,7 +781,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 corr = corr.to(self.device).float().unsqueeze(0) # add batch dimension
 
                 # Denoised reconstruction from prompt
-                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, corr=corr, monte_carlo_steps=1, split=True)
+                recon_noise2noise = self.model.forward_inference(prompt, scale=scale, corr=corr, attenuation_map=att, monte_carlo_steps=1, split=True)
                 # recon_noise2noise = torch.where(gth > 0, recon_noise2noise, torch.nan) # set background to zero for better visualization and metric computation
                 recon_noise2noise = recon_noise2noise.to('cpu').squeeze().detach().numpy().astype(np.float32)
 
