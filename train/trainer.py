@@ -74,7 +74,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
             reconstruction_type='fbp',
             reconstruction_config={},
             n_splits=2,
-            num_workers=10,
+            num_workers=0,
             objective_type='poisson',
             consensus_loss=False, # Either to use consensus loss from 10.48550/arXiv.1906.03639 or not.
             image_consistency=0.0, # balance for image consistency loss, which enforces the average of split outputs to be close to the reconstruction from the prompt.
@@ -818,19 +818,19 @@ class Noise2NoiseTrainer(PytorchTrainer):
                     # create matplotlib figure
                     fig, ax = plt.subplots(1,3, figsize=(10,3))
                     # fig.suptitle(f'Counts: {inference_pipeline.nb_counts}', fontsize=16)
-                    ax[1].imshow(recon_noise2noise, cmap='gray_r', vmin=0, vmax=230)
+                    ax[1].imshow(recon_noise2noise, cmap='gray_r')#, vmin=0, vmax=230)
                     ax[1].set_title(f'Inference\nreconstruction')
                     ax[1].axis('off')
                     plt.colorbar(ax[1].images[0], ax=ax[1], fraction=0.046, pad=0.04)
                     ax[1].annotate(f'PSNR: {PSNR_denoised:.2f} dB,\n SSIM: {SSIM_denoised:.4f}', xy=(0.05,0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
-                    ax[2].imshow(reconstructions['nfpt'], cmap='gray_r', vmin=0, vmax=230)
+                    ax[2].imshow(reconstructions['nfpt'], cmap='gray_r')#, vmin=0, vmax=230)
                     ax[2].set_title(('Noise-free\nreconstruction'))
                     ax[2].axis('off')
                     plt.colorbar(ax[2].images[0], ax=ax[2], fraction=0.046, pad=0.04)
                     ax[2].annotate(f'PSNR: {metrics["psnr_nfpt"]:.2f} dB,\n SSIM: {metrics["ssim_nfpt"]:.4f}', xy=(0.05, 0.05), xycoords='axes fraction', color='black', fontsize=9, verticalalignment='bottom')
 
-                    ax[0].imshow(reconstructions['prompt'], cmap='gray_r', vmin=0, vmax=230)
+                    ax[0].imshow(reconstructions['prompt'], cmap='gray_r')#, vmin=0, vmax=230)
                     ax[0].set_title(f'Prompt\nreconstruction')
                     ax[0].axis('off')
                     plt.colorbar(ax[0].images[0], ax=ax[0], fraction=0.046, pad=0.04)

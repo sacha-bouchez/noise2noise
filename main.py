@@ -23,7 +23,7 @@ if __name__ == "__main__":
                 'image_size' : (160,160),
                 'voxel_size' : (2,2,2),
                 'n_angles' : 300,
-                'acquisition_time' : 207.85, #None, #207.85, # 207.85 is a pre-computed value to match 1e6 counts
+                'acquisition_time' : 109.16, #109.16 is a pre-computed value to match 1e6 counts
                 'scanner_radius' : 300,
                 'nb_counts' : 1e6,
                 'scatter_component' :  0.36,
@@ -50,7 +50,7 @@ if __name__ == "__main__":
             reconstruction_config={},
             physics="backward_pet_radon",
             n_splits=2,
-            num_workers=10,
+            num_workers=0,
             objective_type='mse',
             consensus_loss=False,
             prompt_consistency=0.0,
@@ -97,7 +97,7 @@ if __name__ == "__main__":
         trainer.load_checkpoint(artifact_path="reboot_model")
         #
         sample = trainer.dataset_train[0][1] # get prompt sinogram sample for input shape
-        torchsummary.summary(trainer.model, input_size=(sample.shape[0], sample.shape[1], sample.shape[2]))
+        # torchsummary.summary(trainer.model, input_size=(sample.shape[0], sample.shape[1], sample.shape[2]))
         #
         # start training
         trainer.fit()
