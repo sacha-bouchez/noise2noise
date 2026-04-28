@@ -118,7 +118,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
         self.reconstruction_config = reconstruction_config
         unet_config.update({'reconstruction_config': self.reconstruction_config})
         #
-        self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
+        if not self.supervised:
+            self.n_splits = n_splits # n_splits means n * (n - 1) pairs will be used for noise2noise training
+        else:
+            self.n_splits = 1
         unet_config.update({'n_splits': n_splits})
         #
         if (self.unet_output_domain == self.unet_input_domain == 'image') or (self.supervised and unet_output_domain == 'image'):
@@ -136,8 +139,6 @@ class Noise2NoiseTrainer(PytorchTrainer):
             assert self.unet_output_domain == 'image', "Image consistency loss can only be applied when output domain is image."
 
         self.prompt_consistency = prompt_consistency
-        if self.prompt_consistency > 0:
-            assert not self.supervised, "Prompt consistency loss is only applicable for self-supervised noise2noise training."
 
         self.prior = prior.lower() if prior is not None else None
         self.prior_weight = prior_weight
@@ -448,18 +449,15 @@ class Noise2NoiseTrainer(PytorchTrainer):
             if attenuation_map is None:
                 print("Warning: No attenuation map provided for photon to image domain conversion. Assuming no attenuation for forward operator.")
 
-            if not self.supervised:
-                #
-                projected_output = self.pet_system_operator(
-                    output,
-                    attenuation_map=attenuation_map,
-                    scale=scale,
-                    forward_operator_type=self.forward_operator_type
-                )
-                #
-                loss = self.compute_count_loss(projected_output + corr, target)
-            else:
-                loss = self.objective(output, target)
+            #
+            projected_output = self.pet_system_operator(
+                output,
+                attenuation_map=attenuation_map,
+                scale=scale,
+                forward_operator_type=self.forward_operator_type
+            )
+            #
+            loss = self.compute_count_loss(projected_output + corr, target)
         #
         return loss
     
@@ -555,6 +553,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                 prompt = prompt.to(self.device).float()
                 target = target.to(self.device).float()
                 gth = gth.to(self.device).float()
+                nfpt = nfpt.to(self.device).float()
                 scale = scale.to(self.device).float()
                 att = att.to(self.device).float()
                 att_sino = att_sino.to(self.device).float()
@@ -605,7 +604,10 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         corr=corr
                     )
                     if self.supervised:
-                        loss_target = target
+                        if self.unet_input_domain == 'photon' and self.unet_output_domain == 'image':
+                            loss_target = nfpt
+                        else:
+                            loss_target = target
                     else:
                         loss_target = x_j
                     #
@@ -668,6 +670,7 @@ class Noise2NoiseTrainer(PytorchTrainer):
                         prompt = prompt.to(self.device).float()
                         target = target.to(self.device).float()
                         gth = gth.to(self.device).float()
+                        nfpt = nfpt.to(self.device).float()
                         scale = scale.to(self.device).float()
                         att = att.to(self.device).float()
                         att_sino = att_sino.to(self.device).float()
@@ -730,7 +733,8 @@ class Noise2NoiseTrainer(PytorchTrainer):
                             if not self.supervised:
                                 val_loss = self.compute_loss(output=out_i, target=x_j, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
                             else:
-                                val_loss = self.compute_loss(output=out_i, target=target, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
+                                loss_target = nfpt if self.unet_input_domain == 'photon' and self.unet_output_domain == 'image' else target
+                                val_loss = self.compute_loss(output=out_i, target=loss_target, attenuation_map=att, corr=corr, scale=scale, mask_im=mask_im, mask_sino=mask_sino)
                             val_split_losses.append(val_loss)
                             # Update n2n_ and loss metrics for validation
                             metrics_to_update = [ m.name for m in self.metrics if m.name.startswith('n2n_') or m.name.startswith('loss_') ]

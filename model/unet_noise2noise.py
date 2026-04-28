@@ -77,7 +77,7 @@ class UNetNoise2NoisePET(UNet):
             # update scale if corr is provided
             if corr is not None and scale is not None:
                 count_ratio = [ torch.sum(corr, dim=[1,2,3]) / (torch.sum(yy, dim=[1,2,3])) for yy in y ]  # list of (B,)
-                count_ratio = torch.stack(count_ratio, dim=0)  # (n_sinos * B,)
+                count_ratio = torch.cat(count_ratio, dim=0)  # (n_sinos * B,)
                 scale = scale * count_ratio  # (n_sinos * B,)
 
             if corr is not None:
