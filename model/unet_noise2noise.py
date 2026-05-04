@@ -44,7 +44,7 @@ class UNetNoise2NoisePET(UNet):
         self.n_splits = n_splits
         self.reconstruction_type = reconstruction_type
         self.reconstruction_config = reconstruction_config
-        assert self.reconstruction_type.lower() in ['fbp'], "Currently only FBP is supported."
+        assert self.reconstruction_type.lower() in ['fbp', 'mlem'], "Currently only FBP and MLEM are supported."
         #
         # must call nn.Module init before assigning any nn.Module attributes such as done in init_pet_system_operator and get_reconstruction_operator
         super(UNetNoise2NoisePET, self).__init__(*args, **kwargs)
@@ -67,9 +67,16 @@ class UNetNoise2NoisePET(UNet):
         return self.pet_system_operator
 
     def reconstruction(self, *y, scale=None, attenuation_map=None, corr=None, mode='fbp', **kwargs):
+               
 
         # We apply the adjoint operator to each sinogram and average the results
         # Correction is removed before applying the adjoint.
+
+        if attenuation_map is not None:
+            attenuation_map = attenuation_map.repeat_interleave(repeats=len(y), dim=0)  # (B, 1, H, W)
+
+        if corr is not None:
+            corr = corr.repeat_interleave(repeats=len(y), dim=0)  # (B, C, H, W)
 
         pet_system_operator = self.get_pet_system_operator()
 
@@ -90,7 +97,7 @@ class UNetNoise2NoisePET(UNet):
             x_recon = pet_system_operator.fbp(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), scale=scale, **kwargs) # (n_sinos*B, C, H, W)
 
         elif mode == 'mlem':
-            x_recon = pet_system_operator.mlem(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), num_it=10, corr=corr, attenuation_map=attenuation_map, scale=scale, **kwargs) # (n_sinos*B, C, H, W)
+            x_recon = pet_system_operator.mlem(y.view(-1, y.shape[2], y.shape[3], y.shape[4]), corr=corr, attenuation_map=attenuation_map, scale=scale, **kwargs) # (n_sinos*B, C, H, W)
         else:
             raise ValueError(f"Unknown reconstruction mode: {mode}")
 
@@ -189,14 +196,14 @@ class UNetNoise2NoisePET(UNet):
             else:
                 splits = [x]
 
-            # Concatenate splits along batch dimension
-            splits = torch.cat(splits, dim=0)  # (B * n_splits, C, H, W)
 
 
             # Apply reconstruction if needed
             if self.unet_input_domain == 'image':
-                splits = self.reconstruction(splits, scale=scale, corr=corr, attenuation_map=attenuation_map)  # (B * n_splits, C, H, W)
-
+                splits = self.reconstruction(*splits, scale=scale, corr=corr, attenuation_map=attenuation_map, mode=self.reconstruction_type, **self.reconstruction_config)  # (B * n_splits, C, H, W)
+            else:
+                splits = torch.cat(splits, dim=0)  # (B * n_splits, C, H, W)
+                
             # Denoise
             splits_denoised = self.forward(splits, scale=scale, mask=mask)  # (B * n_splits, C, H, W)
 
@@ -205,7 +212,7 @@ class UNetNoise2NoisePET(UNet):
 
             # Apply reconstruction if needed and average outputs
             if self.unet_output_domain == 'photon':
-                output = self.reconstruction(*splits_denoised, scale=scale, corr=corr, attenuation_map=attenuation_map) # (B, C, H, W)
+                output = self.reconstruction(*splits_denoised, scale=scale, corr=corr, attenuation_map=attenuation_map, mode=self.reconstruction_type, **self.reconstruction_config) # (B, C, H, W)
             else:
                 splits_denoised = torch.stack(splits_denoised, dim=0)  # (n_splits, B, C, H, W)
                 output = torch.mean(splits_denoised, dim=0)  # (B, C, H, W)
@@ -233,7 +240,7 @@ class UNetNoise2NoisePET(UNet):
         """
 
         if self.input_domain == 'photon' and self.output_domain == 'image':
-            x = self.reconstruction(x, scale=scale, corr=corr, attenuation_map=attenuation_map, mode='fbp')  # (B, C, H, W)
+            x = self.reconstruction(x, scale=scale, corr=corr, attenuation_map=attenuation_map, mode=self.reconstruction_type, **self.reconstruction_config)  # (B, C, H, W)
         #
         output = super().forward(x)
         # 
